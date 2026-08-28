@@ -77,3 +77,20 @@ test("完成任务显示独立下载入口", async (t) => {
   const download = completed.getByRole("link", { name: "下载结果" });
   assert.match(await download.getAttribute("href"), /\/api\/tasks\/[0-9a-f-]+\/download$/);
 });
+
+test("没有活动任务时不会持续请求任务列表", async (t) => {
+  const { page, url } = await fixture(t, async (task) => ({ author: task.profileKey, notes: [] }));
+  let listRequests = 0;
+  page.on("request", (request) => {
+    if (request.method() === "GET" && request.url().endsWith("/api/tasks")) listRequests += 1;
+  });
+  const initialList = page.waitForResponse((response) =>
+    response.request().method() === "GET" && response.url().endsWith("/api/tasks"),
+  );
+
+  await page.goto(url);
+  await initialList;
+  await page.waitForTimeout(1_200);
+
+  assert.equal(listRequests, 1);
+});

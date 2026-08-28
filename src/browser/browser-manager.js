@@ -92,11 +92,17 @@ export class BrowserManager {
   async #launch(platform) {
     const profileDir = path.join(this.profilesDir, platform);
     await mkdir(profileDir, { recursive: true });
-    return this.launchPersistentContext(profileDir, {
+    const options = {
       headless: this.headless,
       viewport: { width: 1440, height: 1000 },
       locale: "zh-CN",
       acceptDownloads: false,
-    });
+    };
+    try {
+      return await this.launchPersistentContext(profileDir, options);
+    } catch (error) {
+      if (!/Executable doesn't exist/i.test(error?.message)) throw error;
+      return this.launchPersistentContext(profileDir, { ...options, channel: "chrome" });
+    }
   }
 }

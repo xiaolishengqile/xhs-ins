@@ -20,6 +20,7 @@ const STATUS = {
 
 let refreshPromise = null;
 let refreshAgain = false;
+let hasActiveTasks = false;
 
 function node(tag, className, text) {
   const element = document.createElement(tag);
@@ -91,6 +92,7 @@ function renderTask(task) {
 }
 
 function render(tasks) {
+  hasActiveTasks = tasks.some((task) => ["queued", "running"].includes(task.status));
   const running = tasks.filter((task) => task.status === "running").length;
   const queued = tasks.filter((task) => task.status === "queued").length;
   const completed = tasks.filter((task) => task.status === "completed").length;
@@ -169,5 +171,5 @@ taskList.addEventListener("click", async (event) => {
 
 await refresh();
 setInterval(() => {
-  if (document.visibilityState === "visible") refresh();
+  if (document.visibilityState === "visible" && hasActiveTasks) refresh();
 }, 1_000);

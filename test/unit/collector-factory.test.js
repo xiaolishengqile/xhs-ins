@@ -64,6 +64,31 @@ test("人工处理页面会保持打开并可在恢复成功后统一关闭", as
   assert.equal(page.closed, true);
 });
 
+test("自动化浏览器缓存缺失时改用电脑已安装的浏览器", async (t) => {
+  const profilesDir = await mkdtemp(path.join(tmpdir(), "collector-browser-"));
+  t.after(() => rm(profilesDir, { recursive: true, force: true }));
+  const launchOptions = [];
+  const context = {
+    newPage: async () => ({ close: async () => {} }),
+    request: { get: async () => ({ ok: () => true, body: async () => Buffer.from("image") }) },
+    close: async () => {},
+  };
+  const manager = new BrowserManager({
+    profilesDir,
+    launchPersistentContext: async (_directory, options) => {
+      launchOptions.push(options);
+      if (!options.channel) throw new Error("Executable doesn't exist at temporary cache");
+      return context;
+    },
+  });
+  t.after(() => manager.close());
+
+  await manager.newPage("xiaohongshu");
+
+  assert.equal(launchOptions.length, 2);
+  assert.equal(launchOptions[1].channel, "chrome");
+});
+
 test("媒体下载只允许对应平台的公开图片域名", async (t) => {
   const profilesDir = await mkdtemp(path.join(tmpdir(), "collector-browser-"));
   t.after(() => rm(profilesDir, { recursive: true, force: true }));
