@@ -337,7 +337,6 @@ export class TaskManager {
   async #run(task) {
     const controller = new AbortController();
     let browserSession = null;
-    let preserveHumanAction = false;
     this.running.set(task.id, controller);
     task.status = TASK_STATUS.RUNNING;
     task.error = null;
@@ -387,7 +386,6 @@ export class TaskManager {
             ? "已暂停"
             : "已取消";
       } else if (error?.code === "HUMAN_ACTION_REQUIRED") {
-        preserveHumanAction = true;
         task.status = TASK_STATUS.WAITING_USER;
         task.error = errorMessage(error);
         task.progress.stage = "等待人工登录或验证";
@@ -398,7 +396,7 @@ export class TaskManager {
         task.progress.stage = "采集失败";
       }
     } finally {
-      await browserSession?.close({ preserveHumanAction }).catch(() => {});
+      await browserSession?.close().catch(() => {});
       this.pauseRequested.delete(task.id);
       this.humanActionRequested.delete(task.id);
       task.updatedAt = this.now().toISOString();

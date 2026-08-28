@@ -98,12 +98,10 @@ export class InstagramCollector {
     throwIfAborted(signal);
     const profilePage = await this.browserManager.newPage("instagram");
     let detailPage;
-    let activePage = profilePage;
     try {
       detailPage = await this.browserManager.newPage("instagram");
       await profilePage.goto(task.profileUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
       await profilePage.waitForTimeout(800);
-      await profilePage.bringToFront?.();
       const seen = new Set();
       const notes = [];
       let author = task.profileKey;
@@ -113,7 +111,6 @@ export class InstagramCollector {
 
       while (unchangedRounds < 2 && !stop) {
         throwIfAborted(signal);
-        activePage = profilePage;
         const snapshot = await readProfileSnapshot(profilePage, signal);
         const links = snapshot.links.map(normalizedPostUrl).filter(Boolean);
         const fresh = links.filter((url) => !seen.has(url));
@@ -124,7 +121,6 @@ export class InstagramCollector {
 
         for (const url of fresh) {
           throwIfAborted(signal);
-          activePage = detailPage;
           await detailPage.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
           await detailPage.waitForTimeout(600);
           const detail = await readPostDetail(detailPage, signal);
@@ -148,17 +144,12 @@ export class InstagramCollector {
         }
 
         if (!stop && unchangedRounds < 2) {
-          activePage = profilePage;
           await profilePage.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
           await profilePage.waitForTimeout(800);
         }
       }
       return { author, notes };
     } catch (error) {
-      if (error?.code === "HUMAN_ACTION_REQUIRED") {
-        await activePage.bringToFront?.();
-        await this.browserManager.retainPageForHumanAction?.("instagram", activePage);
-      }
       throw error;
     }
   }

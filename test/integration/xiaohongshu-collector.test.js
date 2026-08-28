@@ -105,23 +105,19 @@ test("主页没有可用笔记编号且显示登录提示时等待人工登录",
     item.id = "";
   }
   const page = new FakePage({ profile, bodyText: "扫码登录后查看更多内容" });
-  let retainedPage;
   const collector = new XiaohongshuCollector({
-    browserManager: {
-      newPage: async () => page,
-      retainPageForHumanAction: async (_platform, value) => { retainedPage = value; },
-    },
+    browserManager: { newPage: async () => page },
   });
 
   await assert.rejects(
     () => collector.collect(task(), { signal: new AbortController().signal, onProgress: async () => {} }),
     LoginRequiredError,
   );
-  assert.equal(retainedPage, page);
+  assert.equal(page.frontCount, 0);
   assert.equal(page.closed, false);
 });
 
-test("读取笔记详情时主页保持在前台", async () => {
+test("读取笔记详情时不会抢占前台", async () => {
   const profile = await fixture("profile-state.json");
   profile.data.notes = [profile.data.notes[0]];
   const detail = await fixture("note-detail.json");
@@ -138,7 +134,7 @@ test("读取笔记详情时主页保持在前台", async () => {
   });
 
   assert.deepEqual(result.notes.map((note) => note.id), ["note-image-1"]);
-  assert.equal(profilePage.frontCount, 1);
+  assert.equal(profilePage.frontCount, 0);
   assert.ok(detailPage.visited.some((url) => url.includes("note-image-1")));
 });
 

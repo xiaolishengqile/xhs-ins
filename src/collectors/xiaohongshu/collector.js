@@ -55,7 +55,6 @@ export class XiaohongshuCollector {
     throwIfAborted(signal);
     const profilePage = await this.browserManager.newPage("xiaohongshu");
     let detailPage;
-    let activePage = profilePage;
     const responsePayloads = [];
     const pendingResponses = new Set();
     const responseListener = (response) => {
@@ -110,11 +109,9 @@ export class XiaohongshuCollector {
       if (selected.length > 0) {
         detailPage = await this.browserManager.newPage("xiaohongshu");
         if (detailPage !== profilePage) detailPage.on?.("response", responseListener);
-        await profilePage.bringToFront?.();
       }
       for (let index = 0; index < selected.length; index += 1) {
         throwIfAborted(signal);
-        activePage = detailPage;
         const item = selected[index];
         const url = detailUrl(item);
         responsePayloads.length = 0;
@@ -141,10 +138,6 @@ export class XiaohongshuCollector {
 
       return { author: author || notes[0]?.author || task.profileKey, notes };
     } catch (error) {
-      if (error?.code === "HUMAN_ACTION_REQUIRED") {
-        await activePage.bringToFront?.();
-        await this.browserManager.retainPageForHumanAction?.("xiaohongshu", activePage);
-      }
       throw error;
     } finally {
       profilePage.off?.("response", responseListener);

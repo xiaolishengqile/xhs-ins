@@ -14,6 +14,7 @@ import { startServer } from "./http/server.js";
 import { TaskManager } from "./tasks/task-manager.js";
 import { TaskStore } from "./tasks/task-store.js";
 import { SchedulerStateStore } from "./tasks/scheduler-state-store.js";
+import { ApplicationController } from "./application/controller.js";
 
 function defaultDataDir() {
   return process.env.VERCEL === "1" ? path.join(tmpdir(), "xhs-ins") : path.resolve(".data");
@@ -46,9 +47,11 @@ export async function createRuntime({ dataDir = defaultDataDir() } = {}) {
     },
   });
   await manager.init();
+  const controller = new ApplicationController({ manager, browserManager });
   return {
     manager,
     browserManager,
+    controller,
     close: async () => {
       await manager.shutdown();
       await browserManager.close();
@@ -62,13 +65,13 @@ let cloudHandler;
 export default async function handleCloudRequest(request, response) {
   cloudRuntimePromise ??= createRuntime();
   const runtime = await cloudRuntimePromise;
-  cloudHandler ??= createApp({ manager: runtime.manager });
+  cloudHandler ??= createApp({ manager: runtime.manager, controller: runtime.controller });
   return cloudHandler(request, response);
 }
 
 export async function main() {
   const runtime = await createRuntime();
-  const instance = await startServer({ handler: createApp({ manager: runtime.manager }) });
+  const instance = await startServer({ handler: createApp({ manager: runtime.manager, controller: runtime.controller }) });
   console.log(`博主图片采集工具已启动：${instance.url}`);
   const shutdown = async () => {
     await instance.close();

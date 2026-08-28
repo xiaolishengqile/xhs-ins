@@ -9,6 +9,10 @@ const MEDIA_HOSTS = {
   xiaohongshu: ["xiaohongshu.com", ".xhscdn.com", ".xhscdn.net"],
   instagram: ["instagram.com", ".cdninstagram.com", ".fbcdn.net"],
 };
+const LOGIN_URLS = {
+  xiaohongshu: "https://www.xiaohongshu.com/",
+  instagram: "https://www.instagram.com/accounts/login/",
+};
 
 function allowedHost(hostname, patterns) {
   return patterns.some((pattern) =>
@@ -40,7 +44,7 @@ function validateMediaUrl(platform, value) {
 export class BrowserManager {
   constructor({
     profilesDir,
-    headless = process.env.COLLECTOR_HEADLESS === "1",
+    headless = process.env.COLLECTOR_HEADLESS !== "0",
     browserLaunchOptions = resolveSystemBrowserLaunchOptions,
     launchPersistentContext = (directory, options) => chromium.launchPersistentContext(directory, options),
   }) {
@@ -51,7 +55,7 @@ export class BrowserManager {
     this.contexts = new Map();
     this.keepalivePages = new Map();
     this.taskSessions = new Map();
-    this.humanActionPages = new Map();
+    this.loginContexts = new Map();
   }
 
   async newPage(platform) {
@@ -73,8 +77,7 @@ export class BrowserManager {
     return session;
   }
 
-  releaseTaskSession(session, { preserveHumanAction = false } = {}) {
-    if (preserveHumanAction) return;
+  releaseTaskSession(session) {
     const key = `${session.platform}:${session.taskId}`;
     if (this.taskSessions.get(key) === session) this.taskSessions.delete(key);
   }
@@ -86,31 +89,44 @@ export class BrowserManager {
     return response.body();
   }
 
-  async retainPageForHumanAction(platform, page) {
-    if (!MEDIA_HOSTS[platform]) throw new Error(`不支持的平台：${platform}`);
-    if (!this.humanActionPages.has(platform)) this.humanActionPages.set(platform, new Set());
-    this.humanActionPages.get(platform).add(page);
+  async openLogin(platform) {
+    if (!LOGIN_URLS[platform]) throw new Error(`不支持的平台：${platform}`);
+    if (!this.loginContexts.has(platform)) {
+      const promise = this.#launchLogin(platform);
+      this.loginContexts.set(platform, promise);
+      promise.catch(() => this.loginContexts.delete(platform));
+    }
+    const login = await this.loginContexts.get(platform);
+    await login.page.bringToFront?.();
+    return login.page;
   }
 
-  async closeHumanActionPages(platform) {
-    const pages = [...(this.humanActionPages.get(platform) ?? [])];
-    this.humanActionPages.delete(platform);
-    await Promise.allSettled(pages.map((page) => page.close()));
+  async closeLogin(platform) {
+    const promise = this.loginContexts.get(platform);
+    if (!promise) return;
+    this.loginContexts.delete(platform);
+    const login = await promise.catch(() => null);
+    await login?.context.close().catch(() => {});
   }
 
   async close() {
     const contexts = await Promise.allSettled([...this.contexts.values()]);
+    const loginContexts = await Promise.allSettled([...this.loginContexts.values()]);
     this.contexts.clear();
+    this.loginContexts.clear();
     this.keepalivePages.clear();
     this.taskSessions.clear();
-    this.humanActionPages.clear();
     await Promise.allSettled(
-      contexts.filter((item) => item.status === "fulfilled").map((item) => item.value.close()),
+      [
+        ...contexts.filter((item) => item.status === "fulfilled").map((item) => item.value),
+        ...loginContexts.filter((item) => item.status === "fulfilled").map((item) => item.value.context),
+      ].map((context) => context.close()),
     );
   }
 
   async #context(platform) {
     if (!MEDIA_HOSTS[platform]) throw new Error(`不支持的平台：${platform}`);
+    if (this.loginContexts.has(platform)) throw new Error("该平台正在登录，请先完成登录");
     if (!this.contexts.has(platform)) {
       const promise = this.#launch(platform);
       this.contexts.set(platform, promise);
@@ -120,28 +136,7 @@ export class BrowserManager {
   }
 
   async #launch(platform) {
-    const profileDir = path.join(this.profilesDir, platform);
-    await mkdir(profileDir, { recursive: true });
-    const options = {
-      headless: this.headless,
-      viewport: { width: 1440, height: 1000 },
-      locale: "zh-CN",
-      acceptDownloads: false,
-    };
-    const browserLaunchOptions = await this.browserLaunchOptions();
-    let context;
-    let launchError;
-    for (const browserOptions of browserLaunchOptions) {
-      try {
-        context = await this.launchPersistentContext(profileDir, { ...options, ...browserOptions });
-        break;
-      } catch (error) {
-        launchError = error;
-      }
-    }
-    if (!context) {
-      throw new Error("无法启动系统默认浏览器，也无法启动备用的谷歌浏览器或微软浏览器", { cause: launchError });
-    }
+    const context = await this.#launchPersistent(platform, this.headless);
     let keepalivePage = (context.pages?.() ?? []).find((page) => page.url?.() === "about:blank");
     keepalivePage ??= await context.newPage();
     this.keepalivePages.set(platform, keepalivePage);
@@ -153,5 +148,46 @@ export class BrowserManager {
       }
     });
     return context;
+  }
+
+  async #launchLogin(platform) {
+    await this.#closeCollectionContext(platform);
+    const context = await this.#launchPersistent(platform, false);
+    const page = (context.pages?.() ?? [])[0] ?? await context.newPage();
+    await page.goto(LOGIN_URLS[platform], { waitUntil: "domcontentloaded", timeout: 60_000 });
+    return { context, page };
+  }
+
+  async #closeCollectionContext(platform) {
+    const promise = this.contexts.get(platform);
+    if (!promise) return;
+    this.contexts.delete(platform);
+    this.keepalivePages.delete(platform);
+    for (const [key, session] of this.taskSessions) {
+      if (session.platform === platform) this.taskSessions.delete(key);
+    }
+    const context = await promise.catch(() => null);
+    await context?.close().catch(() => {});
+  }
+
+  async #launchPersistent(platform, headless) {
+    const profileDir = path.join(this.profilesDir, platform);
+    await mkdir(profileDir, { recursive: true });
+    const options = {
+      headless,
+      viewport: { width: 1440, height: 1000 },
+      locale: "zh-CN",
+      acceptDownloads: false,
+    };
+    const browserLaunchOptions = await this.browserLaunchOptions();
+    let launchError;
+    for (const browserOptions of browserLaunchOptions) {
+      try {
+        return await this.launchPersistentContext(profileDir, { ...options, ...browserOptions });
+      } catch (error) {
+        launchError = error;
+      }
+    }
+    throw new Error("无法启动系统默认浏览器，也无法启动备用的谷歌浏览器或微软浏览器", { cause: launchError });
   }
 }

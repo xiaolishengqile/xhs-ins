@@ -319,13 +319,10 @@ test("失败和取消任务会完整关闭浏览器会话", async (t) => {
   await eventually(() => assert.equal(manager.get(cancelled.id).status, "cancelled"));
   await eventually(() => assert.equal(closeOptions.length, 2));
 
-  assert.deepEqual(closeOptions, [
-    { preserveHumanAction: false },
-    { preserveHumanAction: false },
-  ]);
+  assert.deepEqual(closeOptions, [undefined, undefined]);
 });
 
-test("等待人工处理任务只保留验证页面", async (t) => {
+test("等待人工处理任务也会关闭后台浏览器会话", async (t) => {
   const closeOptions = [];
   const manager = await managerFixture(
     t,
@@ -340,7 +337,7 @@ test("等待人工处理任务只保留验证页面", async (t) => {
 
   await eventually(() => assert.equal(manager.get(created.id).status, "waiting_user"));
 
-  assert.deepEqual(closeOptions, [{ preserveHumanAction: true }]);
+  assert.deepEqual(closeOptions, [undefined]);
 });
 
 test("暂停全部会停止运行任务并冻结队列直到继续", async (t) => {

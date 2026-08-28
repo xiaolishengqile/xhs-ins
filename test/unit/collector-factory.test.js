@@ -107,59 +107,51 @@ test("平台首个空白页只用于保持浏览器且任务使用新页面", as
   assert.equal(initialPage.closed, false);
 });
 
-test("等待人工处理只保留被标记页面并可由下一次会话复用", async (t) => {
+test("采集默认无头运行且登录窗口显式可见", async (t) => {
   const profilesDir = await mkdtemp(path.join(tmpdir(), "collector-browser-"));
   t.after(() => rm(profilesDir, { recursive: true, force: true }));
-  const pages = [];
-  const context = {
-    pages: () => pages,
-    newPage: async () => {
-      const page = {
-        closed: false,
-        url: () => "about:blank",
-        close: async () => { page.closed = true; },
-      };
-      pages.push(page);
-      return page;
-    },
-    request: { get: async () => ({ ok: () => true, body: async () => Buffer.from("image") }) },
-    close: async () => {},
-  };
-  const manager = new BrowserManager({ profilesDir, launchPersistentContext: async () => context });
-  t.after(() => manager.close());
-
-  const session = await manager.createTaskSession("instagram", "task-1");
-  const profile = await session.newPage();
-  const verification = await session.newPage();
-  await session.retainPageForHumanAction("instagram", verification);
-  await session.close({ preserveHumanAction: true });
-
-  assert.equal(profile.closed, true);
-  assert.equal(verification.closed, false);
-  const resumed = await manager.createTaskSession("instagram", "task-1");
-  assert.equal(await resumed.newPage(), verification);
-  await resumed.close();
-  assert.equal(verification.closed, true);
-});
-
-test("人工处理页面会保持打开并可在恢复成功后统一关闭", async (t) => {
-  const profilesDir = await mkdtemp(path.join(tmpdir(), "collector-browser-"));
-  t.after(() => rm(profilesDir, { recursive: true, force: true }));
-  const page = { closed: false, close: async () => { page.closed = true; } };
+  const launches = [];
+  const loginEvents = [];
+  const contexts = [];
   const manager = new BrowserManager({
     profilesDir,
-    launchPersistentContext: async () => ({
-      newPage: async () => page,
-      request: { get: async () => ({ ok: () => true, body: async () => Buffer.from("image") }) },
-      close: async () => {},
-    }),
+    launchPersistentContext: async (directory, options) => {
+      const page = {
+        url: () => "about:blank",
+        close: async () => {},
+        goto: async (url) => loginEvents.push(`goto:${url}`),
+        bringToFront: async () => loginEvents.push("front"),
+      };
+      const context = {
+        closed: false,
+        pages: () => [page],
+        newPage: async () => page,
+        request: { get: async () => ({ ok: () => true, body: async () => Buffer.from("image") }) },
+        close: async () => { context.closed = true; },
+      };
+      launches.push({ directory, options });
+      contexts.push(context);
+      return context;
+    },
   });
   t.after(() => manager.close());
 
-  await manager.retainPageForHumanAction("xiaohongshu", page);
-  assert.equal(page.closed, false);
-  await manager.closeHumanActionPages("xiaohongshu");
-  assert.equal(page.closed, true);
+  await manager.newPage("instagram");
+  assert.equal(launches[0].options.headless, true);
+
+  await manager.openLogin("instagram");
+  await manager.openLogin("instagram");
+
+  assert.equal(contexts[0].closed, true);
+  assert.equal(launches.length, 2);
+  assert.equal(launches[1].options.headless, false);
+  assert.equal(launches[1].directory, launches[0].directory);
+  assert.deepEqual(loginEvents, ["goto:https://www.instagram.com/accounts/login/", "front", "front"]);
+
+  await manager.closeLogin("instagram");
+  assert.equal(contexts[1].closed, true);
+  await manager.newPage("instagram");
+  assert.equal(launches[2].options.headless, true);
 });
 
 test("采集会直接使用系统默认浏览器路径而不启动测试浏览器", async (t) => {

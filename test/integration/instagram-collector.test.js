@@ -118,7 +118,7 @@ test("滚动主页并只保留范围内公开帖子图片", async () => {
   );
   assert.equal(profilePage.closed, false);
   assert.equal(detailPage.closed, false);
-  assert.equal(profilePage.frontCount, 1);
+  assert.equal(profilePage.frontCount, 0);
   assert.ok(progress.some((value) => value.stage === "读取帖子详情"));
 });
 
@@ -164,19 +164,15 @@ test("公开主页被登录墙遮挡时等待人工登录", async () => {
   const profilePage = new ProfilePage([], "Log in to see photos and videos");
   const detailPage = new DetailPage({});
   const pages = [profilePage, detailPage];
-  let retainedPage;
   const collector = new InstagramCollector({
-    browserManager: {
-      newPage: async () => pages.shift(),
-      retainPageForHumanAction: async (_platform, value) => { retainedPage = value; },
-    },
+    browserManager: { newPage: async () => pages.shift() },
   });
 
   await assert.rejects(
     () => collector.collect(task(), { signal: new AbortController().signal, onProgress: async () => {} }),
     LoginRequiredError,
   );
-  assert.equal(retainedPage, profilePage);
+  assert.equal(profilePage.frontCount, 0);
   assert.equal(profilePage.closed, false);
   assert.equal(detailPage.closed, false);
 });
