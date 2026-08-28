@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { extractLinkEntries } from "../../public/link-import.js";
+import { extractLinkEntries } from "../../src/import/link-file.js";
 
 test("文本和逗号分隔内容会提取链接并保留原始行号", () => {
   const entries = extractLinkEntries([

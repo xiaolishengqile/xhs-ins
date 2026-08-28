@@ -9,6 +9,7 @@ import { createApp } from "../../src/http/app.js";
 import { startServer } from "../../src/http/server.js";
 import { TaskManager } from "../../src/tasks/task-manager.js";
 import { TaskStore } from "../../src/tasks/task-store.js";
+import { createLinkDocxBuffer } from "../helpers/docx.js";
 import { eventually } from "../helpers/eventually.js";
 
 async function fixture(t, collect) {
@@ -211,6 +212,27 @@ test("上传链接文件会创建八个任务并保持五个并发", async (t) =
   assert.equal(manager.list().length, 8);
   assert.equal(await page.locator('[data-status="queued"]').count(), 3);
   await page.getByText("已创建 8 个任务").waitFor();
+});
+
+test("上传文档会解析正文、表格和可点击链接并创建任务", async (t) => {
+  const { manager, page, url } = await fixture(
+    t,
+    (_task, { signal }) => new Promise((_resolve, reject) => {
+      signal.addEventListener("abort", () => reject(new DOMException("已取消", "AbortError")), { once: true });
+    }),
+  );
+  await page.goto(url);
+  await page.getByLabel("链接文件").setInputFiles({
+    name: "主页链接.docx",
+    mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    buffer: await createLinkDocxBuffer(),
+  });
+
+  await page.getByRole("button", { name: "导入文件" }).click();
+
+  await page.waitForFunction(() => document.querySelectorAll('[data-status="running"]').length === 3);
+  assert.equal(manager.list().length, 3);
+  await page.getByText("已创建 3 个任务").waitFor();
 });
 
 test("暂停全部会停止运行任务并在继续后恢复五个并发", async (t) => {

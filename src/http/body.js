@@ -1,4 +1,4 @@
-export async function readJson(request, limit = 1_048_576) {
+export async function readBuffer(request, limit = 1_048_576) {
   const chunks = [];
   let size = 0;
   for await (const chunk of request) {
@@ -10,8 +10,13 @@ export async function readJson(request, limit = 1_048_576) {
     }
     chunks.push(chunk);
   }
+  return Buffer.concat(chunks);
+}
+
+export async function readJson(request, limit = 1_048_576) {
+  const buffer = await readBuffer(request, limit);
   try {
-    return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+    return JSON.parse(buffer.toString("utf8") || "{}");
   } catch {
     const error = new Error("请求内容不是有效 JSON");
     error.statusCode = 400;

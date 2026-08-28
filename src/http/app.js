@@ -3,14 +3,14 @@ import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { readJson } from "./body.js";
+import { readBuffer, readJson } from "./body.js";
 import { createCompletedArchive } from "../export/completed-archive.js";
+import { extractLinkEntriesFromFile } from "../import/link-file.js";
 
 const DEFAULT_PUBLIC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../public");
 const STATIC_FILES = new Map([
   ["/", ["index.html", "text/html; charset=utf-8"]],
   ["/app.js", ["app.js", "text/javascript; charset=utf-8"]],
-  ["/link-import.js", ["link-import.js", "text/javascript; charset=utf-8"]],
   ["/styles.css", ["styles.css", "text/css; charset=utf-8"]],
 ]);
 
@@ -63,6 +63,21 @@ async function handleRequest(request, response, { manager, publicDir }) {
   }
   if (request.method === "GET" && pathname === "/api/control") {
     return sendJson(response, 200, manager.controlStatus());
+  }
+  if (request.method === "POST" && pathname === "/api/link-files/parse") {
+    let fileName;
+    try {
+      fileName = decodeURIComponent(String(request.headers["x-file-name"] ?? ""));
+    } catch {
+      const error = new Error("文件名格式无效");
+      error.statusCode = 400;
+      throw error;
+    }
+    const entries = extractLinkEntriesFromFile({
+      buffer: await readBuffer(request, 10 * 1024 * 1024),
+      fileName,
+    });
+    return sendJson(response, 200, { entries });
   }
   if (request.method === "POST" && pathname === "/api/control/pause") {
     return sendJson(response, 200, await manager.pauseAll());

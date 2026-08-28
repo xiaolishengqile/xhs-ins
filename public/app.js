@@ -1,5 +1,3 @@
-import { extractLinkEntries } from "/link-import.js";
-
 const form = document.querySelector("#task-form");
 const urlInput = document.querySelector("#profile-url");
 const presetInput = document.querySelector("#range-preset");
@@ -235,14 +233,23 @@ importLinks.addEventListener("click", async () => {
     message.textContent = "请选择链接文件";
     return;
   }
-  const entries = extractLinkEntries(await file.text());
-  if (entries.length === 0) {
-    message.textContent = "文件中没有找到链接";
-    return;
-  }
   importLinks.disabled = true;
-  message.textContent = `正在导入 ${entries.length} 条链接…`;
+  message.textContent = "正在解析文件…";
   try {
+    const parsed = await request("/api/link-files/parse", {
+      method: "POST",
+      headers: {
+        "content-type": file.type || "application/octet-stream",
+        "x-file-name": encodeURIComponent(file.name),
+      },
+      body: await file.arrayBuffer(),
+    });
+    const entries = parsed.entries;
+    if (entries.length === 0) {
+      message.textContent = "文件中没有找到链接";
+      return;
+    }
+    message.textContent = `已解析 ${entries.length} 条链接，正在创建任务…`;
     const result = await request("/api/tasks/batch", {
       method: "POST",
       headers: { "content-type": "application/json" },

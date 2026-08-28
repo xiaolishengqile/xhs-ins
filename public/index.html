@@ -62,10 +62,14 @@
             <div class="file-import">
               <label class="field">
                 <span>链接文件</span>
-                <input id="link-file" type="file" accept=".txt,.csv,text/plain,text/csv" />
+                <input
+                  id="link-file"
+                  type="file"
+                  accept=".txt,.csv,.docx,text/plain,text/csv,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                />
               </label>
               <button id="import-links" class="secondary-button" type="button">导入文件</button>
-              <span class="file-help">支持文本或表格文件，最多 500 个唯一链接</span>
+              <span class="file-help">支持文本、逗号分隔文件或 .docx 文档，最多 500 个唯一链接</span>
             </div>
 
             <button class="primary-button" type="submit">开始采集</button>

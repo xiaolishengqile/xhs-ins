@@ -10,6 +10,7 @@ import { TaskManager } from "../../src/tasks/task-manager.js";
 import { TaskStore } from "../../src/tasks/task-store.js";
 import { eventually } from "../helpers/eventually.js";
 import { readZipEntries } from "../helpers/zip.js";
+import { createLinkDocxBuffer } from "../helpers/docx.js";
 
 async function fixture(t, collect = async (task) => ({ author: task.profileKey, notes: [] })) {
   const rootDir = await mkdtemp(path.join(tmpdir(), "collector-api-"));
@@ -187,6 +188,26 @@ test("批量创建会跳过无效和重复链接并返回任务摘要", async (t
   ]);
   assert.equal(result.body.control.maxConcurrency, 5);
   assert.equal(manager.list().length, 2);
+});
+
+test("文档上传接口会提取正文、表格和可点击链接", async (t) => {
+  const { url } = await fixture(t);
+  const response = await fetch(`${url}/api/link-files/parse`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "x-file-name": encodeURIComponent("主页链接.docx"),
+    },
+    body: await createLinkDocxBuffer(),
+  });
+  const result = await json(response);
+
+  assert.equal(result.response.status, 200);
+  assert.deepEqual(result.body.entries.map((entry) => entry.url), [
+    "https://www.instagram.com/body_user/",
+    "https://www.xiaohongshu.com/user/profile/table-user",
+    "https://www.instagram.com/clickable_user/",
+  ]);
 });
 
 test("控制接口可以幂等暂停和继续调度器", async (t) => {
