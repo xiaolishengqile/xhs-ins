@@ -18,7 +18,6 @@ function input(index) {
 
 async function managerFixture(t, collect, options = {}) {
   const rootDir = await mkdtemp(path.join(tmpdir(), "collector-manager-"));
-  t.after(() => rm(rootDir, { recursive: true, force: true }));
   const manager = new TaskManager({
     store: new TaskStore(rootDir),
     collectorFactory: () => ({ collect }),
@@ -27,7 +26,10 @@ async function managerFixture(t, collect, options = {}) {
     ...options,
   });
   await manager.init();
-  t.after(() => manager.shutdown());
+  t.after(async () => {
+    await manager.shutdown();
+    await rm(rootDir, { recursive: true, force: true });
+  });
   return manager;
 }
 
@@ -107,7 +109,6 @@ test("失败任务可以重试且其他任务照常完成", async (t) => {
 
 test("应用重启后会恢复未完成任务", async (t) => {
   const rootDir = await mkdtemp(path.join(tmpdir(), "collector-restart-"));
-  t.after(() => rm(rootDir, { recursive: true, force: true }));
   const store = new TaskStore(rootDir);
   await store.save({
     id: "123e4567-e89b-12d3-a456-426614174000",
@@ -128,7 +129,10 @@ test("应用重启后会恢复未完成任务", async (t) => {
     collectorFactory: () => ({ collect: async () => ({ author: "恢复任务", notes: [] }) }),
     exporter: async () => path.join(rootDir, "result.zip"),
   });
-  t.after(() => manager.shutdown());
+  t.after(async () => {
+    await manager.shutdown();
+    await rm(rootDir, { recursive: true, force: true });
+  });
 
   await manager.init();
 

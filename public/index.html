@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>采图台</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="hero">
+        <p class="eyebrow">本地私有工具</p>
+        <h1>公开博主图片采集</h1>
+        <p class="hero-copy">同时处理 5 位博主。当前任务运行时，可以继续提交下一条链接。</p>
+      </header>
+
+      <main>
+        <section class="panel create-panel" aria-labelledby="create-title">
+          <div class="section-heading">
+            <div>
+              <p class="section-index">01</p>
+              <h2 id="create-title">新建采集任务</h2>
+            </div>
+            <span class="capacity-note">并发上限 5</span>
+          </div>
+
+          <form id="task-form">
+            <label class="field field-url">
+              <span>博主主页链接</span>
+              <input
+                id="profile-url"
+                name="url"
+                type="url"
+                required
+                autocomplete="off"
+                placeholder="粘贴小红书或 Instagram 博主主页链接"
+              />
+            </label>
+
+            <label class="field">
+              <span>采集周期</span>
+              <select id="range-preset" name="preset">
+                <option value="week">最近一周</option>
+                <option value="month">最近一个月</option>
+                <option value="halfYear">最近半年</option>
+                <option value="custom">自定义日期</option>
+              </select>
+            </label>
+
+            <div id="custom-range" class="custom-range" hidden>
+              <label class="field">
+                <span>开始日期</span>
+                <input id="date-from" type="date" />
+              </label>
+              <label class="field">
+                <span>结束日期</span>
+                <input id="date-to" type="date" />
+              </label>
+            </div>
+
+            <button class="primary-button" type="submit">开始采集</button>
+          </form>
+          <p id="form-message" class="form-message" role="status" aria-live="polite"></p>
+        </section>
+
+        <section class="overview" aria-label="任务概览">
+          <article class="metric-card metric-running">
+            <span>运行中</span>
+            <strong data-testid="running-summary">0 / 5</strong>
+          </article>
+          <article class="metric-card">
+            <span>等待中</span>
+            <strong id="queued-summary">0</strong>
+          </article>
+          <article class="metric-card">
+            <span>已完成</span>
+            <strong id="completed-summary">0</strong>
+          </article>
+        </section>
+
+        <section class="tasks-section" aria-labelledby="tasks-title">
+          <div class="section-heading">
+            <div>
+              <p class="section-index">02</p>
+              <h2 id="tasks-title">采集任务</h2>
+            </div>
+            <span id="refresh-status" class="refresh-status">自动刷新</span>
+          </div>
+          <div id="empty-state" class="empty-state">
+            <span>还没有任务</span>
+            <p>在上方粘贴一个公开博主主页链接即可开始。</p>
+          </div>
+          <div id="task-list" class="task-list" aria-live="polite"></div>
+        </section>
+      </main>
+
+      <footer>
+        仅采集公开可见内容。互动数量为采集时快照，平台未公开的数据会保留为空。
+      </footer>
+    </div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
