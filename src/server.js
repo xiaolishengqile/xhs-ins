@@ -52,21 +52,19 @@ export async function createRuntime({ dataDir = defaultDataDir() } = {}) {
   };
 }
 
+let cloudRuntimePromise;
+let cloudHandler;
+
+export default async function handleCloudRequest(request, response) {
+  cloudRuntimePromise ??= createRuntime();
+  const runtime = await cloudRuntimePromise;
+  cloudHandler ??= createApp({ manager: runtime.manager });
+  return cloudHandler(request, response);
+}
+
 export async function main() {
-  const runtimePromise = createRuntime();
-  let handler;
-  const cloud = process.env.VERCEL === "1";
-  const instance = await startServer({
-    handler: (request, response) => {
-      runtimePromise.then((runtime) => {
-        handler ??= createApp({ manager: runtime.manager });
-        handler(request, response);
-      }).catch((error) => response.destroy(error));
-    },
-    host: cloud ? "0.0.0.0" : "127.0.0.1",
-    port: Number(process.env.PORT ?? 4310),
-  });
-  const runtime = await runtimePromise;
+  const runtime = await createRuntime();
+  const instance = await startServer({ handler: createApp({ manager: runtime.manager }) });
   console.log(`博主图片采集工具已启动：${instance.url}`);
   const shutdown = async () => {
     await instance.close();
@@ -78,7 +76,7 @@ export async function main() {
 }
 
 const isEntrypoint = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
-if (isEntrypoint || process.env.VERCEL === "1") {
+if (isEntrypoint && process.env.VERCEL !== "1") {
   main().catch((error) => {
     console.error(error);
     process.exitCode = 1;
