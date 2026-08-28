@@ -35,6 +35,24 @@ async function fixture(t, options = {}) {
   return { manager, rootDir };
 }
 
+function blockNextRecoverySave(manager) {
+  const save = manager.store.save.bind(manager.store);
+  let release;
+  let markStarted;
+  let blocked = false;
+  const started = new Promise((resolve) => { markStarted = resolve; });
+  const gate = new Promise((resolve) => { release = resolve; });
+  manager.store.save = async (task) => {
+    if (!blocked && task.status === "queued" && task.progress.stage === "等待重新检测") {
+      blocked = true;
+      markStarted();
+      await gate;
+    }
+    return save(task);
+  };
+  return { started, release };
+}
+
 test("浏览器启动失败只熔断同平台一次且其他平台继续", async (t) => {
   let instagramAttempts = 0;
   const { manager } = await fixture(t, {
@@ -168,4 +186,50 @@ test("服务重启后自动重新检测浏览器受阻任务", async (t) => {
 
   await eventually(() => assert.equal(manager.list()[0].status, "completed"));
   assert.equal(manager.list()[0].blockReason, null);
+});
+
+test("恢复平台期间取消后续任务不会被重新排队", async (t) => {
+  const { manager } = await fixture(t, {
+    taskSessionFactory: async () => {
+      throw new BrowserLaunchError([{ browser: "chrome", error: "系统终止浏览器" }]);
+    },
+  });
+  const first = await manager.create(input("instagram", "cancel_race_first"));
+  const second = await manager.create(input("instagram", "cancel_race_second"));
+  await manager.startBatch([first.id, second.id]);
+  await eventually(() => assert.equal(manager.get(second.id).status, "blocked"));
+  manager.maxConcurrency = 0;
+  const gate = blockNextRecoverySave(manager);
+
+  const recovering = manager.recoverPlatform("instagram");
+  await gate.started;
+  await manager.cancel(second.id);
+  gate.release();
+  await recovering;
+
+  assert.equal(manager.get(second.id).status, "cancelled");
+  assert.equal(manager.controlStatus().queued, 1);
+});
+
+test("恢复平台期间删除后续任务不会在磁盘复活", async (t) => {
+  const { manager } = await fixture(t, {
+    taskSessionFactory: async () => {
+      throw new BrowserLaunchError([{ browser: "chrome", error: "系统终止浏览器" }]);
+    },
+  });
+  const first = await manager.create(input("instagram", "delete_race_first"));
+  const second = await manager.create(input("instagram", "delete_race_second"));
+  await manager.startBatch([first.id, second.id]);
+  await eventually(() => assert.equal(manager.get(second.id).status, "blocked"));
+  manager.maxConcurrency = 0;
+  const gate = blockNextRecoverySave(manager);
+
+  const recovering = manager.recoverPlatform("instagram");
+  await gate.started;
+  await manager.delete(second.id);
+  gate.release();
+  await recovering;
+
+  assert.equal(manager.get(second.id), null);
+  assert.equal((await manager.store.loadAll()).some((task) => task.id === second.id), false);
 });

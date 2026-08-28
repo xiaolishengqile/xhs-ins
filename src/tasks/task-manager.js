@@ -322,14 +322,19 @@ export class TaskManager {
       throw new Error("该平台没有浏览器运行环境故障");
     }
     this.platformBlocks.delete(platform);
-    const tasks = [...this.tasks.values()].filter(
+    const taskIds = [...this.tasks.values()].filter(
       (task) => task.platform === platform
         && task.status === TASK_STATUS.BLOCKED
         && task.blockReason === "browser",
-    );
-    for (const task of tasks) await this.#requeue(task, "等待重新检测", false);
+    ).map((task) => task.id);
+    const recovered = [];
+    for (const id of taskIds) {
+      const task = this.tasks.get(id);
+      if (task?.status !== TASK_STATUS.BLOCKED || task.blockReason !== "browser") continue;
+      recovered.push(await this.#requeue(task, "等待重新检测", false));
+    }
     this.#requestSchedule();
-    return tasks.map((task) => clone(task));
+    return recovered;
   }
 
   async delete(id) {
