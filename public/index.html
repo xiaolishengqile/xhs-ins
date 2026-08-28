@@ -12,7 +12,7 @@
       <header class="hero">
         <p class="eyebrow">本地私有工具</p>
         <h1>公开博主图片采集</h1>
-        <p class="hero-copy">同时处理 5 位博主。支持一次粘贴多条链接，每行一条。</p>
+        <p class="hero-copy">先整理任务，再按需开始。后台最多同时静默采集 5 位博主。</p>
       </header>
 
       <main>
@@ -34,7 +34,7 @@
                 required
                 autocomplete="off"
                 rows="4"
-                placeholder="粘贴小红书或 Instagram 博主主页链接，每行一条，最多 5 条"
+                placeholder="粘贴小红书或 Instagram 博主主页链接，每行一条，手动输入最多 500 条"
               ></textarea>
             </label>
 
@@ -69,15 +69,20 @@
                 />
               </label>
               <button id="import-links" class="secondary-button" type="button">导入文件</button>
-              <span class="file-help">支持文本、逗号分隔文件或 .docx 文档，最多 500 个唯一链接</span>
+              <button id="load-builtin" class="secondary-button" type="button">加载内置博主（719）</button>
+              <span class="file-help">导入文件和加载内置名单只会填充上方输入区，不会自动采集。</span>
             </div>
 
-            <button class="primary-button" type="submit">开始采集</button>
+            <button class="primary-button" type="submit">加入待采集</button>
           </form>
           <p id="form-message" class="form-message" role="status" aria-live="polite"></p>
         </section>
 
         <section class="overview" aria-label="任务概览">
+          <article class="metric-card metric-pending">
+            <span>待开始</span>
+            <strong id="pending-summary">0</strong>
+          </article>
           <article class="metric-card metric-running">
             <span>运行中</span>
             <strong data-testid="running-summary">0 / 5</strong>
@@ -105,9 +110,7 @@
             <div class="task-controls">
               <span id="scheduler-status" class="refresh-status">正常调度</span>
               <button id="pause-all" class="task-action" type="button">暂停全部</button>
-              <button id="download-completed" class="task-action" type="button" disabled>
-                下载已完成任务（0）
-              </button>
+              <button id="open-output" class="task-action" type="button">打开图片文件夹</button>
               <span id="refresh-status" class="refresh-status">自动刷新</span>
             </div>
           </div>
@@ -117,20 +120,23 @@
               <span>全选</span>
             </label>
             <span id="selection-count">已选 0 项</span>
+            <button id="start-selected" class="task-action" type="button" disabled>
+              开始选中（0）
+            </button>
             <button id="delete-selected" class="task-action task-action-danger" type="button" disabled>
               删除选中（0）
             </button>
           </div>
           <div id="empty-state" class="empty-state">
             <span>还没有任务</span>
-            <p>在上方粘贴公开博主主页链接即可开始，每行一条。</p>
+            <p>在上方整理链接并加入待采集，然后手动开始任务。</p>
           </div>
           <div id="task-list" class="task-list" aria-live="polite"></div>
         </section>
       </main>
 
       <footer>
-        仅采集公开可见内容。互动数量为采集时快照，平台未公开的数据会保留为空。
+        仅采集公开图文中的图片，视频会被过滤。删除任务不会删除已经保存到图片文件夹的图片。
       </footer>
     </div>
     <script type="module" src="/app.js"></script>

@@ -1,10 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { chromium } from "playwright";
 
+import { ApplicationController } from "../../src/application/controller.js";
+import { LoginRequiredError } from "../../src/collectors/errors.js";
 import { createApp } from "../../src/http/app.js";
 import { startServer } from "../../src/http/server.js";
 import { TaskManager } from "../../src/tasks/task-manager.js";
@@ -12,76 +14,166 @@ import { TaskStore } from "../../src/tasks/task-store.js";
 import { createLinkDocxBuffer } from "../helpers/docx.js";
 import { eventually } from "../helpers/eventually.js";
 
-async function fixture(t, collect) {
+async function fixture(t, collect = async (task) => ({ author: task.profileKey, notes: [] })) {
   const rootDir = await mkdtemp(path.join(tmpdir(), "collector-e2e-"));
+  const events = [];
   const manager = new TaskManager({
     store: new TaskStore(rootDir),
     collectorFactory: () => ({ collect }),
-    exporter: async (task, _notes, taskDir) => {
-      const resultPath = path.join(taskDir, "result.zip");
-      await writeFile(resultPath, `archive:${task.id}`);
-      return resultPath;
-    },
+    exporter: async (task) => path.join(rootDir, "output", task.profileKey),
     now: () => new Date(2026, 7, 28, 12),
   });
   await manager.init();
-  const instance = await startServer({ handler: createApp({ manager }), port: 0 });
+  const browserManager = {
+    close: async () => events.push("close-browser"),
+    openLogin: async (platform) => events.push(`open-login:${platform}`),
+    closeLogin: async (platform) => events.push(`close-login:${platform}`),
+  };
+  const controller = new ApplicationController({
+    manager,
+    browserManager,
+    outputDir: path.join(rootDir, "output"),
+    ensureDir: async () => {},
+    openPath: async (directory) => events.push(`open-output:${directory}`),
+  });
+  const instance = await startServer({ handler: createApp({ manager, controller }), port: 0 });
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage();
-  page.setDefaultTimeout(2_000);
+  page.setDefaultTimeout(4_000);
   t.after(async () => {
     await browser.close();
     await instance.close();
     await manager.shutdown();
     await rm(rootDir, { recursive: true, force: true });
   });
-  return { manager, page, url: instance.url };
+  return { manager, page, events, outputDir: path.join(rootDir, "output"), url: instance.url };
 }
 
-test("六次提交会显示五个运行任务和一个等待任务且表单保持可用", async (t) => {
-  const { page, url } = await fixture(
+test("手动提交只创建待开始任务，点击开始后才运行", async (t) => {
+  const { manager, page, url } = await fixture(
     t,
     (_task, { signal }) => new Promise((_resolve, reject) => {
       signal.addEventListener("abort", () => reject(new DOMException("已取消", "AbortError")), { once: true });
     }),
   );
   await page.goto(url);
+  await page.getByLabel("博主主页链接").fill("https://www.instagram.com/manual_creator/");
 
-  for (let index = 0; index < 6; index += 1) {
-    await page.getByLabel("博主主页链接").fill(`https://www.xiaohongshu.com/user/profile/ui-user-${index}`);
-    await page.getByRole("button", { name: "开始采集" }).click();
-  }
+  await page.getByRole("button", { name: "加入待采集" }).click();
 
-  await page.locator("[data-task-id]").first().waitFor();
-  await page.waitForFunction(() =>
-    document.querySelectorAll('[data-status="running"]').length === 5 &&
-    document.querySelectorAll('[data-status="queued"]').length === 1,
-  );
-  assert.equal(await page.locator('[data-status="running"]').count(), 5);
-  assert.equal(await page.locator('[data-status="queued"]').count(), 1);
-  assert.equal(await page.getByTestId("running-summary").textContent(), "5 / 5");
-  assert.equal(await page.getByLabel("博主主页链接").isEnabled(), true);
-
-  await page.locator('[data-status="running"]').first().getByRole("button", { name: "取消" }).click();
-  await page.waitForFunction(() => document.querySelectorAll('[data-status="cancelled"]').length === 1);
-  await page.waitForFunction(() => document.querySelectorAll('[data-status="running"]').length === 5);
-  assert.equal(await page.locator('[data-status="queued"]').count(), 0);
+  await page.locator('[data-status="pending"]').waitFor();
+  assert.equal(manager.list()[0].status, "pending");
+  await page.locator('[data-status="pending"]').getByRole("button", { name: "开始" }).click();
+  await page.locator('[data-status="running"]').waitFor();
+  assert.equal(manager.list()[0].status, "running");
 });
 
-test("完成任务显示独立下载入口", async (t) => {
-  const { page, url } = await fixture(t, async (task) => ({ author: task.profileKey, notes: [] }));
+test("导入文档只填充链接预览，不会自动创建任务", async (t) => {
+  const { manager, page, url } = await fixture(t);
   await page.goto(url);
-  await page.getByLabel("博主主页链接").fill("https://www.instagram.com/download.creator/");
-  await page.getByRole("button", { name: "开始采集" }).click();
+  await page.getByLabel("链接文件").setInputFiles({
+    name: "主页链接.docx",
+    mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    buffer: await createLinkDocxBuffer(),
+  });
 
-  const completed = page.locator('[data-status="completed"]');
-  await completed.waitFor();
-  const download = completed.getByRole("link", { name: "下载结果" });
-  assert.match(await download.getAttribute("href"), /\/api\/tasks\/[0-9a-f-]+\/download$/);
+  await page.getByRole("button", { name: "导入文件" }).click();
+
+  await page.getByText("已导入 3 条链接，请确认后加入待采集").waitFor();
+  assert.equal(manager.list().length, 0);
+  assert.equal((await page.getByLabel("博主主页链接").inputValue()).split("\n").length, 3);
 });
 
-test("没有活动任务时不会持续请求任务列表", async (t) => {
-  const { page, url } = await fixture(t, async (task) => ({ author: task.profileKey, notes: [] }));
+test("加载内置博主只预览，确认后分批创建 719 个待开始任务", async (t) => {
+  const { manager, page, url } = await fixture(t);
+  await page.goto(url);
+
+  await page.getByRole("button", { name: "加载内置博主（719）" }).click();
+
+  await page.getByText("已加载 719 位内置博主，请确认后加入待采集").waitFor();
+  assert.equal(manager.list().length, 0);
+  await page.getByRole("button", { name: "加入待采集" }).click();
+  await page.getByText("已创建 719 个待开始任务").waitFor({ timeout: 12_000 });
+  assert.equal(manager.list().length, 719);
+  assert.ok(manager.list().every((task) => task.status === "pending"));
+});
+
+test("选中待开始任务后可以批量开始", async (t) => {
+  const { manager, page, url } = await fixture(t);
+  for (let index = 0; index < 3; index += 1) {
+    await manager.create({
+      url: `https://www.instagram.com/bulk_start_${index}/`,
+      range: { preset: "week" },
+    });
+  }
+  await page.goto(url);
+  const cards = page.locator("[data-task-id]");
+  await cards.nth(0).getByRole("checkbox").check();
+  await cards.nth(1).getByRole("checkbox").check();
+
+  await page.getByRole("button", { name: "开始选中（2）" }).click();
+
+  await eventually(() => assert.equal(manager.list().filter((task) => task.status === "completed").length, 2));
+  assert.equal(manager.list().filter((task) => task.status === "pending").length, 1);
+});
+
+test("任务可以批量删除且提示不会删除已保存图片", async (t) => {
+  const { manager, page, url } = await fixture(t);
+  for (let index = 0; index < 2; index += 1) {
+    await manager.create({
+      url: `https://www.instagram.com/bulk_delete_${index}/`,
+      range: { preset: "week" },
+    });
+  }
+  await page.goto(url);
+  await page.getByRole("checkbox", { name: "全选任务" }).check();
+  page.once("dialog", async (dialog) => {
+    assert.match(dialog.message(), /不会删除已经保存到图片文件夹的图片/);
+    await dialog.accept();
+  });
+
+  await page.getByRole("button", { name: "删除选中（2）" }).click();
+
+  await page.getByText("还没有任务").waitFor();
+  assert.equal(manager.list().length, 0);
+});
+
+test("等待登录时由用户显式打开窗口并确认继续", async (t) => {
+  let requiresLogin = true;
+  const { manager, page, events, url } = await fixture(t, async (task) => {
+    if (requiresLogin) throw new LoginRequiredError();
+    return { author: task.profileKey, notes: [] };
+  });
+  const created = await manager.create({
+    url: "https://www.instagram.com/login_creator/",
+    range: { preset: "week" },
+  });
+  await manager.start(created.id);
+  await eventually(() => assert.equal(manager.get(created.id).status, "waiting_user"));
+  await page.goto(url);
+
+  await page.getByRole("button", { name: "打开登录窗口" }).click();
+  assert.deepEqual(events, ["open-login:instagram"]);
+
+  requiresLogin = false;
+  await page.getByRole("button", { name: "我已处理，继续" }).click();
+  await page.locator('[data-status="completed"]').waitFor();
+  assert.deepEqual(events, ["open-login:instagram", "close-login:instagram"]);
+});
+
+test("页面只提供打开图片文件夹，不提供结果下载", async (t) => {
+  const { page, events, outputDir, url } = await fixture(t);
+  await page.goto(url);
+
+  assert.equal(await page.getByText("下载结果").count(), 0);
+  assert.equal(await page.getByText(/下载已完成任务/).count(), 0);
+  await page.getByRole("button", { name: "打开图片文件夹" }).click();
+
+  assert.deepEqual(events, [`open-output:${outputDir}`]);
+});
+
+test("没有运行任务时不会持续轮询任务列表", async (t) => {
+  const { page, url } = await fixture(t);
   let listRequests = 0;
   page.on("request", (request) => {
     if (request.method() === "GET" && request.url().endsWith("/api/tasks")) listRequests += 1;
@@ -95,189 +187,4 @@ test("没有活动任务时不会持续请求任务列表", async (t) => {
   await page.waitForTimeout(1_200);
 
   assert.equal(listRequests, 1);
-});
-
-test("一次粘贴五条链接会创建五个并行任务并自动去重", async (t) => {
-  const { manager, page, url } = await fixture(
-    t,
-    (_task, { signal }) => new Promise((_resolve, reject) => {
-      signal.addEventListener("abort", () => reject(new DOMException("已取消", "AbortError")), { once: true });
-    }),
-  );
-  const links = Array.from(
-    { length: 5 },
-    (_value, index) => `https://www.xiaohongshu.com/user/profile/batch-user-${index}`,
-  );
-  await page.goto(url);
-  await page.getByLabel("博主主页链接").fill([...links, links[0]].join("\n"));
-
-  await page.getByRole("button", { name: "开始采集" }).click();
-
-  await page.waitForFunction(() => document.querySelectorAll('[data-status="running"]').length === 5);
-  assert.equal(manager.list().length, 5);
-  assert.deepEqual(new Set(manager.list().map((task) => task.profileUrl)), new Set(links));
-});
-
-test("一次输入超过五位不同博主时不会创建部分任务", async (t) => {
-  const { manager, page, url } = await fixture(t, async (task) => ({ author: task.profileKey, notes: [] }));
-  const links = Array.from(
-    { length: 6 },
-    (_value, index) => `https://www.xiaohongshu.com/user/profile/too-many-${index}`,
-  );
-  await page.goto(url);
-  await page.getByLabel("博主主页链接").fill(links.join("\n"));
-
-  await page.getByRole("button", { name: "开始采集" }).click();
-
-  await page.getByText("一次最多提交 5 条链接").waitFor();
-  assert.equal(manager.list().length, 0);
-});
-
-test("任务卡片可以确认后永久删除", async (t) => {
-  const { manager, page, url } = await fixture(t, async (task) => ({ author: task.profileKey, notes: [] }));
-  await page.goto(url);
-  await page.getByLabel("博主主页链接").fill("https://www.instagram.com/remove.creator/");
-  await page.getByRole("button", { name: "开始采集" }).click();
-  const completed = page.locator('[data-status="completed"]');
-  await completed.waitFor();
-  page.once("dialog", (dialog) => dialog.accept());
-
-  await completed.getByRole("button", { name: "删除" }).click();
-
-  await page.getByText("还没有任务").waitFor();
-  assert.equal(manager.list().length, 0);
-});
-
-test("全选后可以一次删除所有任务", async (t) => {
-  const { manager, page, url } = await fixture(t, async (task) => ({ author: task.profileKey, notes: [] }));
-  for (let index = 0; index < 3; index += 1) {
-    await manager.create({
-      url: `https://www.instagram.com/bulk_remove_${index}/`,
-      range: { preset: "week" },
-    });
-  }
-  await eventually(() => assert.ok(manager.list().every((task) => task.status === "completed")));
-  await page.goto(url);
-
-  await page.getByRole("checkbox", { name: "全选任务" }).check();
-  page.once("dialog", (dialog) => dialog.accept());
-  await page.getByRole("button", { name: "删除选中（3）" }).click();
-
-  await page.getByText("还没有任务").waitFor();
-  assert.equal(manager.list().length, 0);
-});
-
-test("批量删除只移除勾选的任务", async (t) => {
-  const { manager, page, url } = await fixture(t, async (task) => ({ author: task.profileKey, notes: [] }));
-  for (let index = 0; index < 3; index += 1) {
-    await manager.create({
-      url: `https://www.instagram.com/partial_remove_${index}/`,
-      range: { preset: "week" },
-    });
-  }
-  await eventually(() => assert.ok(manager.list().every((task) => task.status === "completed")));
-  await page.goto(url);
-  const cards = page.locator("[data-task-id]");
-
-  await cards.nth(0).getByRole("checkbox").check();
-  await cards.nth(1).getByRole("checkbox").check();
-  page.once("dialog", (dialog) => dialog.accept());
-  await page.getByRole("button", { name: "删除选中（2）" }).click();
-
-  await eventually(() => assert.equal(manager.list().length, 1));
-  await page.waitForFunction(() => document.querySelectorAll("[data-task-id]").length === 1);
-  assert.equal(await page.locator("[data-task-id]").count(), 1);
-});
-
-test("上传链接文件会创建八个任务并保持五个并发", async (t) => {
-  const { manager, page, url } = await fixture(
-    t,
-    (_task, { signal }) => new Promise((_resolve, reject) => {
-      signal.addEventListener("abort", () => reject(new DOMException("已取消", "AbortError")), { once: true });
-    }),
-  );
-  await page.goto(url);
-  await page.getByLabel("链接文件").setInputFiles({
-    name: "links.txt",
-    mimeType: "text/plain",
-    buffer: Buffer.from(Array.from(
-      { length: 8 },
-      (_value, index) => `https://www.instagram.com/file_user_${index}/`,
-    ).join("\n")),
-  });
-
-  await page.getByRole("button", { name: "导入文件" }).click();
-
-  await page.waitForFunction(() => document.querySelectorAll('[data-status="running"]').length === 5);
-  assert.equal(manager.list().length, 8);
-  assert.equal(await page.locator('[data-status="queued"]').count(), 3);
-  await page.getByText("已创建 8 个任务").waitFor();
-});
-
-test("上传文档会解析正文、表格和可点击链接并创建任务", async (t) => {
-  const { manager, page, url } = await fixture(
-    t,
-    (_task, { signal }) => new Promise((_resolve, reject) => {
-      signal.addEventListener("abort", () => reject(new DOMException("已取消", "AbortError")), { once: true });
-    }),
-  );
-  await page.goto(url);
-  await page.getByLabel("链接文件").setInputFiles({
-    name: "主页链接.docx",
-    mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    buffer: await createLinkDocxBuffer(),
-  });
-
-  await page.getByRole("button", { name: "导入文件" }).click();
-
-  await page.waitForFunction(() => document.querySelectorAll('[data-status="running"]').length === 3);
-  assert.equal(manager.list().length, 3);
-  await page.getByText("已创建 3 个任务").waitFor();
-});
-
-test("暂停全部会停止运行任务并在继续后恢复五个并发", async (t) => {
-  const { manager, page, url } = await fixture(
-    t,
-    (_task, { signal }) => new Promise((_resolve, reject) => {
-      signal.addEventListener("abort", () => reject(new DOMException("已取消", "AbortError")), { once: true });
-    }),
-  );
-  for (let index = 0; index < 6; index += 1) {
-    await manager.create({
-      url: `https://www.instagram.com/pause_user_${index}/`,
-      range: { preset: "week" },
-    });
-  }
-  await eventually(() => assert.equal(manager.controlStatus().running, 5));
-  await page.goto(url);
-
-  await page.getByRole("button", { name: "暂停全部" }).click();
-
-  await page.getByText("队列已暂停").waitFor();
-  assert.equal(await page.locator('[data-status="paused"]').count(), 5);
-  assert.equal(await page.locator('[data-status="queued"]').count(), 1);
-
-  await page.getByRole("button", { name: "继续全部" }).click();
-
-  await page.waitForFunction(() => document.querySelectorAll('[data-status="running"]').length === 5);
-  assert.equal(manager.controlStatus().paused, false);
-});
-
-test("汇总下载按钮显示完成数量且无结果时禁用", async (t) => {
-  const { manager, page, url } = await fixture(t, async (task) => ({ author: task.profileKey, notes: [] }));
-  await page.goto(url);
-  assert.equal(await page.getByRole("button", { name: "下载已完成任务（0）" }).isDisabled(), true);
-  await manager.create({
-    url: "https://www.instagram.com/all_download/",
-    range: { preset: "week" },
-  });
-  await eventually(() => assert.equal(manager.list()[0].status, "completed"));
-  await page.reload();
-  const downloadButton = page.getByRole("button", { name: "下载已完成任务（1）" });
-  assert.equal(await downloadButton.isDisabled(), false);
-
-  const downloadPromise = page.waitForEvent("download");
-  await downloadButton.click();
-  const download = await downloadPromise;
-  assert.equal(download.suggestedFilename(), "completed-tasks.zip");
 });

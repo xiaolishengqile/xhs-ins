@@ -105,6 +105,18 @@ test("批量启动接口只启动选中的待开始任务", async (t) => {
   await eventually(() => assert.ok(manager.list().every((task) => task.status === "completed")));
 });
 
+test("内置博主接口返回文档中的 719 个唯一主页", async (t) => {
+  const { url } = await fixture(t);
+
+  const result = await json(await fetch(`${url}/api/profiles/builtin`));
+
+  assert.equal(result.response.status, 200);
+  assert.equal(result.body.profiles.length, 719);
+  assert.equal(new Set(result.body.profiles).size, 719);
+  assert.equal(result.body.profiles[0], "https://www.instagram.com/lucencyofficial/");
+  assert.equal(result.body.profiles.at(-1), "https://www.instagram.com/wwwluchen/");
+});
+
 test("接口拒绝无效链接、无效数据和不存在任务", async (t) => {
   const { url } = await fixture(t);
   const invalidLink = await json(
@@ -180,7 +192,7 @@ test("取消和重试只影响指定任务", async (t) => {
   await eventually(() => assert.equal(manager.get(created.task.id).status, "completed"));
 });
 
-test("删除任务接口会移除任务及其结果文件", async (t) => {
+test("删除任务接口会移除任务记录", async (t) => {
   const { url, manager } = await fixture(t);
   const created = await (
     await fetch(`${url}/api/tasks`, {

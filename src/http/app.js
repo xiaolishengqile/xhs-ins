@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 
 import { readBuffer, readJson } from "./body.js";
 import { extractLinkEntriesFromFile } from "../import/link-file.js";
+import builtinProfiles from "../data/builtin-profiles.json" with { type: "json" };
 
 const DEFAULT_PUBLIC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../public");
 const STATIC_FILES = new Map([
@@ -58,6 +59,9 @@ async function handleRequest(request, response, { manager, controller, publicDir
   }
   if (request.method === "GET" && pathname === "/api/tasks") {
     return sendJson(response, 200, { tasks: manager.list() });
+  }
+  if (request.method === "GET" && pathname === "/api/profiles/builtin") {
+    return sendJson(response, 200, { profiles: builtinProfiles });
   }
   if (request.method === "GET" && pathname === "/api/control") {
     return sendJson(response, 200, manager.controlStatus());
