@@ -40,7 +40,7 @@ async function json(response) {
 }
 
 test("健康检查与任务创建、列表和详情接口可用", async (t) => {
-  const { url } = await fixture(t);
+  const { url, manager } = await fixture(t);
   const health = await json(await fetch(`${url}/api/health`));
   assert.equal(health.response.status, 200);
   assert.deepEqual(health.body, { status: "ok", maxConcurrency: 5 });
@@ -57,11 +57,45 @@ test("健康检查与任务创建、列表和详情接口可用", async (t) => {
   );
   assert.equal(created.response.status, 202);
   assert.equal(created.body.task.profileKey, "api-user");
+  assert.equal(created.body.task.status, "pending");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(manager.get(created.body.task.id).status, "pending");
+
+  const started = await json(await fetch(`${url}/api/tasks/${created.body.task.id}/start`, { method: "POST" }));
+  assert.equal(started.response.status, 200);
+  await eventually(() => assert.equal(manager.get(created.body.task.id).status, "completed"));
 
   const listed = await json(await fetch(`${url}/api/tasks`));
   assert.equal(listed.body.tasks.length, 1);
   const detail = await json(await fetch(`${url}/api/tasks/${created.body.task.id}`));
   assert.equal(detail.body.task.id, created.body.task.id);
+});
+
+test("批量启动接口只启动选中的待开始任务", async (t) => {
+  const { url, manager } = await fixture(t);
+  const created = await json(await fetch(`${url}/api/tasks/batch`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      entries: [
+        { line: 1, url: "https://www.instagram.com/start_one/" },
+        { line: 2, url: "https://www.instagram.com/start_two/" },
+      ],
+      range: { preset: "week" },
+    }),
+  }));
+  const ids = created.body.tasks.map((task) => task.id);
+
+  const started = await json(await fetch(`${url}/api/tasks/start-batch`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ids: [ids[0], ids[0], ids[1]] }),
+  }));
+
+  assert.equal(started.response.status, 200);
+  assert.deepEqual(started.body.started.sort(), ids.sort());
+  assert.deepEqual(started.body.skipped, []);
+  await eventually(() => assert.ok(manager.list().every((task) => task.status === "completed")));
 });
 
 test("接口拒绝无效链接、无效数据和不存在任务", async (t) => {
@@ -102,6 +136,7 @@ test("任务完成后可以下载结果", async (t) => {
       }),
     })
   ).json();
+  await fetch(`${url}/api/tasks/${created.task.id}/start`, { method: "POST" });
   await eventually(() => assert.equal(manager.get(created.task.id).status, "completed"));
 
   const response = await fetch(`${url}/api/tasks/${created.task.id}/download`);
@@ -130,6 +165,7 @@ test("取消和重试只影响指定任务", async (t) => {
       }),
     })
   ).json();
+  await fetch(`${url}/api/tasks/${created.task.id}/start`, { method: "POST" });
   await eventually(() => assert.equal(manager.get(created.task.id).status, "running"));
 
   assert.equal((await fetch(`${url}/api/tasks/${created.task.id}/cancel`, { method: "POST" })).status, 200);
@@ -153,6 +189,7 @@ test("删除任务接口会移除任务及其结果文件", async (t) => {
       }),
     })
   ).json();
+  await fetch(`${url}/api/tasks/${created.task.id}/start`, { method: "POST" });
   await eventually(() => assert.equal(manager.get(created.task.id).status, "completed"));
 
   const removed = await json(await fetch(`${url}/api/tasks/${created.task.id}`, { method: "DELETE" }));
@@ -248,6 +285,7 @@ test("汇总下载包含点击时所有可用的完成任务", async (t) => {
     url: "https://www.xiaohongshu.com/user/profile/all-two",
     range: { preset: "week" },
   });
+  await manager.startBatch([first.id, second.id]);
   await eventually(() => assert.ok(manager.list().every((task) => task.status === "completed")));
 
   const response = await fetch(`${url}/api/tasks/download-completed`);

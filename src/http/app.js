@@ -105,8 +105,12 @@ async function handleRequest(request, response, { manager, publicDir }) {
     const result = await manager.createBatch(await readJson(request));
     return sendJson(response, 202, { ...result, control: manager.controlStatus() });
   }
+  if (request.method === "POST" && pathname === "/api/tasks/start-batch") {
+    const { ids } = await readJson(request);
+    return sendJson(response, 200, await manager.startBatch(ids));
+  }
 
-  const taskMatch = pathname.match(/^\/api\/tasks\/([0-9a-f-]+)(?:\/(cancel|retry|resume|download))?$/i);
+  const taskMatch = pathname.match(/^\/api\/tasks\/([0-9a-f-]+)(?:\/(start|cancel|retry|resume|download))?$/i);
   if (taskMatch) {
     const [, id, action] = taskMatch;
     const task = manager.get(id);
@@ -116,7 +120,7 @@ async function handleRequest(request, response, { manager, publicDir }) {
       await manager.delete(id);
       return sendJson(response, 200, { deleted: true });
     }
-    if (["cancel", "retry", "resume"].includes(action) && request.method === "POST") {
+    if (["start", "cancel", "retry", "resume"].includes(action) && request.method === "POST") {
       const updated = await manager[action](id);
       return sendJson(response, 200, { task: updated });
     }

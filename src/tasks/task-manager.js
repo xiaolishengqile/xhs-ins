@@ -77,8 +77,8 @@ export class TaskManager {
       profileKey: profile.profileKey,
       from: range.from,
       to: range.to,
-      status: TASK_STATUS.QUEUED,
-      progress: { stage: "等待采集", current: 0, total: 0, imagesDownloaded: 0 },
+      status: TASK_STATUS.PENDING,
+      progress: { stage: "待开始", current: 0, total: 0, imagesDownloaded: 0 },
       author: null,
       error: null,
       resultPath: null,
@@ -88,10 +88,33 @@ export class TaskManager {
       completedAt: null,
     };
     this.tasks.set(task.id, task);
-    this.queue.push(task.id);
     await this.store.save(task);
-    this.#requestSchedule();
     return clone(task);
+  }
+
+  async start(id) {
+    if (this.closed) throw new Error("任务管理器已关闭");
+    if (this.paused) throw new Error("调度器已暂停，请先继续调度");
+    const task = this.#requireTask(id);
+    if (task.status !== TASK_STATUS.PENDING) throw new Error("只有待开始任务可以启动");
+    return this.#requeue(task, "等待采集");
+  }
+
+  async startBatch(ids) {
+    if (!Array.isArray(ids)) throw new Error("任务编号必须是数组");
+    if (this.paused) throw new Error("调度器已暂停，请先继续调度");
+    const started = [];
+    const skipped = [];
+    for (const id of new Set(ids)) {
+      const task = this.tasks.get(id);
+      if (!task || task.status !== TASK_STATUS.PENDING) {
+        skipped.push(id);
+        continue;
+      }
+      await this.#requeue(task, "等待采集");
+      started.push(id);
+    }
+    return { started, skipped };
   }
 
   async createBatch({ entries, range }) {
@@ -150,6 +173,16 @@ export class TaskManager {
         this.#requestSchedule();
         throw error;
       }
+    }
+    const queued = this.queue;
+    this.queue = [];
+    for (const id of queued) {
+      const task = this.tasks.get(id);
+      if (!task || task.status !== TASK_STATUS.QUEUED) continue;
+      task.status = TASK_STATUS.PAUSED;
+      task.progress.stage = "已暂停";
+      task.updatedAt = this.now().toISOString();
+      await this.store.save(task);
     }
     const runningPromises = [];
     for (const [id, controller] of this.running) {

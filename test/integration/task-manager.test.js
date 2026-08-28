@@ -34,6 +34,53 @@ async function managerFixture(t, collect, options = {}) {
   return manager;
 }
 
+async function createAndStart(manager, taskInput) {
+  const task = await manager.create(taskInput);
+  await manager.start(task.id);
+  return task;
+}
+
+test("新任务保持待开始，用户明确启动后才采集", async (t) => {
+  let runs = 0;
+  const manager = await managerFixture(t, async (task) => {
+    runs += 1;
+    return { author: task.profileKey, notes: [] };
+  });
+
+  const created = await manager.create(input(0));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(created.status, "pending");
+  assert.equal(manager.get(created.id).status, "pending");
+  assert.equal(runs, 0);
+
+  await manager.start(created.id);
+  await eventually(() => assert.equal(manager.get(created.id).status, "completed"));
+  assert.equal(runs, 1);
+});
+
+test("批量启动只启动待开始任务并跳过重复编号", async (t) => {
+  const manager = await managerFixture(t, async (task) => ({ author: task.profileKey, notes: [] }));
+  const first = await manager.create(input(0));
+  const second = await manager.create(input(1));
+
+  const result = await manager.startBatch([first.id, first.id, second.id]);
+
+  assert.deepEqual(result.started.sort(), [first.id, second.id].sort());
+  assert.deepEqual(result.skipped, []);
+  await eventually(() => assert.ok(manager.list().every((task) => task.status === "completed")));
+});
+
+test("调度器暂停时拒绝启动待开始任务", async (t) => {
+  const manager = await managerFixture(t, async (task) => ({ author: task.profileKey, notes: [] }));
+  const created = await manager.create(input(0));
+
+  await manager.pauseAll();
+
+  await assert.rejects(() => manager.start(created.id), /调度器已暂停/);
+  assert.equal(manager.get(created.id).status, "pending");
+});
+
 test("六个任务中最多五个并行且空位出现后第六个自动开始", async (t) => {
   const releases = [];
   let active = 0;
@@ -56,6 +103,7 @@ test("六个任务中最多五个并行且空位出现后第六个自动开始",
 
   const created = [];
   for (let index = 0; index < 6; index += 1) created.push(await manager.create(input(index)));
+  await manager.startBatch(created.map((task) => task.id));
 
   await eventually(() => assert.equal(active, 5));
   assert.equal(maxActive, 5);
@@ -82,6 +130,7 @@ test("运行任务可取消且不会影响其他任务", async (t) => {
   });
   const first = await manager.create(input(0));
   const second = await manager.create(input(1));
+  await manager.startBatch([first.id, second.id]);
 
   await eventually(() => assert.equal(manager.get(first.id).status, "running"));
   await manager.cancel(first.id);
@@ -105,7 +154,7 @@ test("删除运行任务会先停止采集并彻底移除记录", async (t) => {
       });
     },
   );
-  const created = await manager.create(input(0));
+  const created = await createAndStart(manager, input(0));
   const taskDir = manager.store.taskDir(created.id);
   await eventually(() => assert.equal(started, true));
 
@@ -125,6 +174,7 @@ test("失败任务可以重试且其他任务照常完成", async (t) => {
   });
   const failed = await manager.create(input(0));
   const healthy = await manager.create(input(1));
+  await manager.startBatch([failed.id, healthy.id]);
 
   await eventually(() => assert.equal(manager.get(failed.id).status, "failed"));
   await eventually(() => assert.equal(manager.get(healthy.id).status, "completed"));
@@ -174,6 +224,7 @@ test("等待人工登录的任务会释放并发名额", async (t) => {
   }, { maxConcurrency: 1 });
   const waiting = await manager.create(input(0));
   const next = await manager.create(input(1));
+  await manager.startBatch([waiting.id, next.id]);
 
   await eventually(() => assert.equal(manager.get(waiting.id).status, "waiting_user"));
   await eventually(() => assert.equal(manager.get(next.id).status, "completed"));
@@ -191,7 +242,7 @@ test("导出阶段可以更新图片下载进度", async (t) => {
       },
     },
   );
-  const created = await manager.create(input(0));
+  const created = await createAndStart(manager, input(0));
 
   await eventually(() => assert.equal(manager.get(created.id).status, "completed"));
   assert.equal(manager.get(created.id).progress.imagesDownloaded, 2);
@@ -221,7 +272,7 @@ test("任务页面在媒体导出和归档完成后才关闭", async (t) => {
       },
     },
   );
-  const created = await manager.create(input(0));
+  const created = await createAndStart(manager, input(0));
 
   await eventually(() => assert.equal(manager.get(created.id).status, "completed"));
 
@@ -247,9 +298,9 @@ test("失败和取消任务会完整关闭浏览器会话", async (t) => {
       },
     },
   );
-  const failed = await manager.create(input(0));
+  const failed = await createAndStart(manager, input(0));
   await eventually(() => assert.equal(manager.get(failed.id).status, "failed"));
-  const cancelled = await manager.create(input(1));
+  const cancelled = await createAndStart(manager, input(1));
   await eventually(() => assert.equal(manager.get(cancelled.id).status, "running"));
   await eventually(() => assert.equal(sessionCreations, 2));
   await manager.cancel(cancelled.id);
@@ -273,7 +324,7 @@ test("等待人工处理任务只保留验证页面", async (t) => {
       }),
     },
   );
-  const created = await manager.create(input(0));
+  const created = await createAndStart(manager, input(0));
 
   await eventually(() => assert.equal(manager.get(created.id).status, "waiting_user"));
 
@@ -303,6 +354,7 @@ test("暂停全部会停止运行任务并冻结队列直到继续", async (t) =
   );
   const first = await manager.create(input(0));
   const second = await manager.create(input(1));
+  await manager.startBatch([first.id, second.id]);
   await eventually(() => assert.equal(manager.get(first.id).status, "running"));
   await eventually(() => assert.equal(runs.get(first.id), 1));
 
@@ -310,10 +362,10 @@ test("暂停全部会停止运行任务并冻结队列直到继续", async (t) =
 
   assert.equal(paused.paused, true);
   assert.equal(manager.get(first.id).status, "paused");
-  assert.equal(manager.get(second.id).status, "queued");
+  assert.equal(manager.get(second.id).status, "paused");
   assert.equal(runs.has(second.id), false);
-  assert.equal(manager.controlStatus().queued, 1);
-  assert.equal(manager.controlStatus().pausedTasks, 1);
+  assert.equal(manager.controlStatus().queued, 0);
+  assert.equal(manager.controlStatus().pausedTasks, 2);
 
   const resumed = await manager.resumeAll();
 
