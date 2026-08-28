@@ -72,11 +72,11 @@ test("手动提交只创建待开始任务，点击开始后才运行", async (t
   assert.equal(manager.list()[0].status, "running");
 });
 
-test("采集周期可以选择最近一年", async (t) => {
+test("采集周期默认使用最近一年", async (t) => {
   const { manager, page, url } = await fixture(t);
   await page.goto(url);
+  assert.equal(await page.locator("#range-preset").inputValue(), "year");
   await page.getByLabel("博主主页链接").fill("https://www.instagram.com/year_creator/");
-  await page.locator("#range-preset").selectOption("year");
 
   await page.getByRole("button", { name: "加入待采集" }).click();
 
