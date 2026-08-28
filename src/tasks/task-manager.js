@@ -191,8 +191,10 @@ export class TaskManager {
     task.error = null;
     task.progress.stage = "已取消";
     task.updatedAt = this.now().toISOString();
+    const runningPromise = this.taskRuns.get(id);
     this.running.get(id)?.abort();
     await this.store.save(task);
+    if (runningPromise) await Promise.allSettled([runningPromise]);
     this.#requestSchedule();
     return clone(task);
   }
