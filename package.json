@@ -1,0 +1,22 @@
+{
+  "name": "social-media-image-collector",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test --test-reporter=spec",
+    "test:unit": "node --test --test-reporter=spec test/unit/*.test.js",
+    "test:integration": "node --test --test-reporter=spec test/integration/*.test.js",
+    "test:e2e": "node --test --test-reporter=spec test/e2e/*.test.js",
+    "check": "node --check src/server.js",
+    "install:browser": "playwright install chromium"
+  },
+  "dependencies": {
+    "playwright": "1.62.1",
+    "yazl": "3.3.1"
+  }
+}
