@@ -15,8 +15,8 @@ function normalizedPostUrl(value) {
   try {
     const url = new URL(value, "https://www.instagram.com/");
     if (url.protocol !== "https:" || !["instagram.com", "www.instagram.com"].includes(url.hostname)) return null;
-    const match = url.pathname.match(/^\/(p|reel)\/([^/]+)\/?/);
-    return match ? `https://www.instagram.com/${match[1]}/${match[2]}/` : null;
+    const match = url.pathname.match(/^\/p\/([^/]+)\/?/);
+    return match ? `https://www.instagram.com/p/${match[1]}/` : null;
   } catch {
     return null;
   }
@@ -28,10 +28,10 @@ function isInRange(value, from, to) {
   return time >= new Date(from).getTime() && time <= new Date(to).getTime();
 }
 
-function mergeVisibleImages(note, images) {
-  const type = note.type === "video" ? "video-cover" : "image";
-  const urls = [...new Set([...note.media.map((item) => item.url), ...images])];
-  note.media = urls.map((url) => ({ url, type, localPath: null, error: null }));
+function mergeVisibleImages(note, images, hasVideo) {
+  const metadataImages = hasVideo ? [] : note.media.map((item) => item.url);
+  const urls = [...new Set([...metadataImages, ...images])];
+  note.media = urls.map((url) => ({ url, type: "image", localPath: null, error: null }));
   return note;
 }
 
@@ -41,6 +41,7 @@ async function readPostDetail(page, signal) {
   let bodyText = "";
   let previousSnapshot = "";
   let unchangedRounds = 0;
+  let hasVideo = false;
 
   for (let step = 0; step < 50 && unchangedRounds < 2; step += 1) {
     throwIfAborted(signal);
@@ -50,10 +51,12 @@ async function readPostDetail(page, signal) {
       images: [...document.querySelectorAll("article img")]
         .filter((image) => image.naturalWidth >= 200 || image.width >= 200)
         .map((image) => image.currentSrc || image.src),
+      hasVideo: Boolean(document.querySelector("article video")),
     }));
     html ||= snapshot.html;
     bodyText = snapshot.bodyText;
     checkPageText(bodyText, true);
+    hasVideo ||= Boolean(snapshot.hasVideo);
     for (const url of snapshot.images ?? []) images.add(url);
 
     const signature = (snapshot.images ?? []).join("|");
@@ -68,7 +71,7 @@ async function readPostDetail(page, signal) {
     await page.waitForTimeout(400);
   }
 
-  return { html, bodyText, images: [...images] };
+  return { html, bodyText, images: [...images], hasVideo };
 }
 
 export class InstagramCollector {
@@ -113,9 +116,13 @@ export class InstagramCollector {
           await detailPage.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
           await detailPage.waitForTimeout(600);
           const detail = await readPostDetail(detailPage, signal);
-          const note = mergeVisibleImages(parseInstagramPostHtml(detail.html, url), detail.images ?? []);
+          const note = mergeVisibleImages(
+            parseInstagramPostHtml(detail.html, url),
+            detail.images ?? [],
+            detail.hasVideo,
+          );
           author = note.author || author;
-          if (isInRange(note.publishedAt, task.from, task.to)) {
+          if (note.media.length > 0 && isInRange(note.publishedAt, task.from, task.to)) {
             notes.push(note);
             consecutiveOld = 0;
           } else if (note.publishedAt && new Date(note.publishedAt) < new Date(task.from)) {

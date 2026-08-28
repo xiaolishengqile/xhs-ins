@@ -61,7 +61,7 @@ function task() {
   };
 }
 
-test("采集范围内图文和视频封面并跳过旧笔记", async () => {
+test("采集范围内图文并跳过视频和旧笔记", async () => {
   const profile = await fixture("profile-state.json");
   const imageDetail = await fixture("note-detail.json");
   const videoDetail = structuredClone(imageDetail);
@@ -86,11 +86,11 @@ test("采集范围内图文和视频封面并跳过旧笔记", async () => {
   });
 
   assert.equal(result.author, "测试博主");
-  assert.deepEqual(result.notes.map((note) => note.id), ["note-image-1", "note-video-1"]);
-  assert.equal(result.notes[1].media[0].type, "video-cover");
+  assert.deepEqual(result.notes.map((note) => note.id), ["note-image-1"]);
+  assert.ok(!page.visited.some((url) => url.includes("note-video-1")));
   assert.ok(!page.visited.some((url) => url.includes("note-old-1")));
   assert.equal(page.closed, true);
-  assert.ok(progress.some((value) => value.stage === "读取笔记详情" && value.current === 2));
+  assert.ok(progress.some((value) => value.stage === "读取笔记详情" && value.current === 1 && value.total === 1));
 });
 
 test("主页没有可用笔记编号且显示登录提示时等待人工登录", async () => {

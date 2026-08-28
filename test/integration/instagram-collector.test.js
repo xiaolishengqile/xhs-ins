@@ -31,12 +31,14 @@ class DetailPage {
     this.details = details;
     this.currentUrl = "";
     this.currentIndex = 0;
+    this.visited = [];
     this.closed = false;
   }
 
   async goto(url) {
     this.currentUrl = url;
     this.currentIndex = 0;
+    this.visited.push(url);
   }
 
   async evaluate() {
@@ -132,6 +134,66 @@ test("公开主页被登录墙遮挡时等待人工登录", async () => {
   assert.equal(retainedPage, profilePage);
   assert.equal(profilePage.closed, false);
   assert.equal(detailPage.closed, true);
+});
+
+test("短视频链接不会打开或返回", async () => {
+  const html = await readFile(new URL("../fixtures/instagram/post.html", import.meta.url), "utf8");
+  const reelUrl = "https://www.instagram.com/reel/video-1/";
+  const profilePage = new ProfilePage([reelUrl]);
+  const detailPage = new DetailPage({
+    [reelUrl]: { html, bodyText: "Public video", images: [], hasVideo: true },
+  });
+  const pages = [profilePage, detailPage];
+  const collector = new InstagramCollector({ browserManager: { newPage: async () => pages.shift() } });
+
+  const result = await collector.collect(task(), {
+    signal: new AbortController().signal,
+    onProgress: async () => {},
+  });
+
+  assert.deepEqual(result.notes, []);
+  assert.deepEqual(detailPage.visited, []);
+});
+
+test("普通帖子链接中的纯视频不会返回", async () => {
+  const html = await readFile(new URL("../fixtures/instagram/post.html", import.meta.url), "utf8");
+  const postUrl = "https://www.instagram.com/p/video-only/";
+  const profilePage = new ProfilePage([postUrl]);
+  const detailPage = new DetailPage({
+    [postUrl]: { html, bodyText: "Public video", images: [], hasVideo: true },
+  });
+  const pages = [profilePage, detailPage];
+  const collector = new InstagramCollector({ browserManager: { newPage: async () => pages.shift() } });
+
+  const result = await collector.collect(task(), {
+    signal: new AbortController().signal,
+    onProgress: async () => {},
+  });
+
+  assert.deepEqual(result.notes, []);
+});
+
+test("混合轮播只保留其中的图片", async () => {
+  const html = await readFile(new URL("../fixtures/instagram/post.html", import.meta.url), "utf8");
+  const postUrl = "https://www.instagram.com/p/mixed-post/";
+  const imageUrl = "https://scontent.cdninstagram.com/mixed-image.jpg";
+  const profilePage = new ProfilePage([postUrl]);
+  const detailPage = new DetailPage({
+    [postUrl]: [
+      { html, bodyText: "Public mixed post", images: [], hasVideo: true },
+      { html, bodyText: "Public mixed post", images: [imageUrl], hasVideo: false },
+    ],
+  });
+  const pages = [profilePage, detailPage];
+  const collector = new InstagramCollector({ browserManager: { newPage: async () => pages.shift() } });
+
+  const result = await collector.collect(task(), {
+    signal: new AbortController().signal,
+    onProgress: async () => {},
+  });
+
+  assert.equal(result.notes.length, 1);
+  assert.deepEqual(result.notes[0].media.map((item) => item.url), [imageUrl]);
 });
 
 test("轮播帖子会点击下一张并收集后续加载图片", async () => {

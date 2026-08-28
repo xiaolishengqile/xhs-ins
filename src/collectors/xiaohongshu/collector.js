@@ -98,7 +98,7 @@ export class XiaohongshuCollector {
       if (allCandidates.length > 0 && usable.length === 0) throw new LoginRequiredError("公开主页未返回笔记编号，请先登录");
       await checkHumanAction(page, usable.length === 0);
 
-      const selected = usable.filter((item) => inRange(item.publishedAt, task.from, task.to));
+      const selected = usable.filter((item) => item.type !== "video" && inRange(item.publishedAt, task.from, task.to));
       const notes = [];
       for (let index = 0; index < selected.length; index += 1) {
         throwIfAborted(signal);
@@ -122,7 +122,7 @@ export class XiaohongshuCollector {
           await checkHumanAction(page, true);
           throw new Error(`无法读取笔记详情：${item.title || item.id}`);
         }
-        if (inRange(note.publishedAt, task.from, task.to)) notes.push(note);
+        if (note.type !== "video" && inRange(note.publishedAt, task.from, task.to)) notes.push(note);
         await onProgress({ stage: "读取笔记详情", current: index + 1, total: selected.length });
       }
 
