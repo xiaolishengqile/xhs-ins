@@ -65,9 +65,81 @@ test("同一平台的多个页面复用一个持久浏览器会话", async (t) =
   await first.close();
 
   assert.equal(launches, 1);
-  assert.equal(pages.length, 2);
+  assert.equal(pages.length, 3);
   assert.equal(contextClosed, false);
-  assert.equal(second, pages[1]);
+  assert.equal(first, pages[1]);
+  assert.equal(second, pages[2]);
+});
+
+test("平台首个空白页只用于保持浏览器且任务使用新页面", async (t) => {
+  const profilesDir = await mkdtemp(path.join(tmpdir(), "collector-browser-"));
+  t.after(() => rm(profilesDir, { recursive: true, force: true }));
+  const initialPage = {
+    closed: false,
+    url: () => "about:blank",
+    close: async () => { initialPage.closed = true; },
+  };
+  const createdPages = [];
+  const context = {
+    pages: () => [initialPage, ...createdPages],
+    newPage: async () => {
+      const page = {
+        closed: false,
+        url: () => "about:blank",
+        close: async () => { page.closed = true; },
+      };
+      createdPages.push(page);
+      return page;
+    },
+    request: { get: async () => ({ ok: () => true, body: async () => Buffer.from("image") }) },
+    close: async () => {},
+  };
+  const manager = new BrowserManager({ profilesDir, launchPersistentContext: async () => context });
+  t.after(() => manager.close());
+
+  const session = await manager.createTaskSession("instagram", "task-1");
+  const taskPage = await session.newPage();
+
+  assert.notEqual(taskPage, initialPage);
+  await session.close();
+  await session.close();
+  assert.equal(taskPage.closed, true);
+  assert.equal(initialPage.closed, false);
+});
+
+test("等待人工处理只保留被标记页面并可由下一次会话复用", async (t) => {
+  const profilesDir = await mkdtemp(path.join(tmpdir(), "collector-browser-"));
+  t.after(() => rm(profilesDir, { recursive: true, force: true }));
+  const pages = [];
+  const context = {
+    pages: () => pages,
+    newPage: async () => {
+      const page = {
+        closed: false,
+        url: () => "about:blank",
+        close: async () => { page.closed = true; },
+      };
+      pages.push(page);
+      return page;
+    },
+    request: { get: async () => ({ ok: () => true, body: async () => Buffer.from("image") }) },
+    close: async () => {},
+  };
+  const manager = new BrowserManager({ profilesDir, launchPersistentContext: async () => context });
+  t.after(() => manager.close());
+
+  const session = await manager.createTaskSession("instagram", "task-1");
+  const profile = await session.newPage();
+  const verification = await session.newPage();
+  await session.retainPageForHumanAction("instagram", verification);
+  await session.close({ preserveHumanAction: true });
+
+  assert.equal(profile.closed, true);
+  assert.equal(verification.closed, false);
+  const resumed = await manager.createTaskSession("instagram", "task-1");
+  assert.equal(await resumed.newPage(), verification);
+  await resumed.close();
+  assert.equal(verification.closed, true);
 });
 
 test("人工处理页面会保持打开并可在恢复成功后统一关闭", async (t) => {
@@ -141,7 +213,7 @@ test("默认系统浏览器启动失败时会切换另一款系统浏览器", as
   assert.deepEqual(launchedChannels, ["chrome", "msedge"]);
 });
 
-test("持久浏览器启动后会复用自动生成的首个空白页", async (t) => {
+test("持久浏览器启动后会保留自动生成的首个空白页", async (t) => {
   const profilesDir = await mkdtemp(path.join(tmpdir(), "collector-browser-"));
   t.after(() => rm(profilesDir, { recursive: true, force: true }));
   const initialPage = {
@@ -149,9 +221,13 @@ test("持久浏览器启动后会复用自动生成的首个空白页", async (t
     url: () => "about:blank",
     close: async () => { initialPage.closed = true; },
   };
+  let taskPage;
   const context = {
     pages: () => [initialPage],
-    newPage: async () => ({ url: () => "about:blank", close: async () => {} }),
+    newPage: async () => {
+      taskPage = { url: () => "about:blank", close: async () => {} };
+      return taskPage;
+    },
     request: { get: async () => ({ ok: () => true, body: async () => Buffer.from("image") }) },
     close: async () => {},
   };
@@ -163,7 +239,8 @@ test("持久浏览器启动后会复用自动生成的首个空白页", async (t
 
   const page = await manager.newPage("xiaohongshu");
 
-  assert.equal(page, initialPage);
+  assert.equal(page, taskPage);
+  assert.notEqual(page, initialPage);
   assert.equal(initialPage.closed, false);
 });
 

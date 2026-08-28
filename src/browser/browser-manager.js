@@ -3,6 +3,7 @@ import path from "node:path";
 import { chromium } from "playwright";
 
 import { resolveSystemBrowserLaunchOptions } from "./system-browser.js";
+import { TaskBrowserSession } from "./task-browser-session.js";
 
 const MEDIA_HOSTS = {
   xiaohongshu: ["xiaohongshu.com", ".xhscdn.com", ".xhscdn.net"],
@@ -48,22 +49,34 @@ export class BrowserManager {
     this.browserLaunchOptions = browserLaunchOptions;
     this.launchPersistentContext = launchPersistentContext;
     this.contexts = new Map();
+    this.keepalivePages = new Map();
+    this.taskSessions = new Map();
     this.humanActionPages = new Map();
-    this.claimedPages = new WeakSet();
   }
 
   async newPage(platform) {
-    const context = await this.#context(platform);
-    const reusablePage = (context.pages?.() ?? []).find(
-      (page) => page.url() === "about:blank" && !this.claimedPages.has(page),
-    );
-    if (reusablePage) {
-      this.claimedPages.add(reusablePage);
-      return reusablePage;
-    }
-    const page = await context.newPage();
-    this.claimedPages.add(page);
-    return page;
+    return this.createTaskPage(platform);
+  }
+
+  async createTaskPage(platform) {
+    return (await this.#context(platform)).newPage();
+  }
+
+  async createTaskSession(platform, taskId) {
+    if (!taskId) throw new Error("任务编号不能为空");
+    await this.#context(platform);
+    const key = `${platform}:${taskId}`;
+    const existing = this.taskSessions.get(key);
+    if (existing && !existing.closed) return existing;
+    const session = new TaskBrowserSession({ manager: this, platform, taskId });
+    this.taskSessions.set(key, session);
+    return session;
+  }
+
+  releaseTaskSession(session, { preserveHumanAction = false } = {}) {
+    if (preserveHumanAction) return;
+    const key = `${session.platform}:${session.taskId}`;
+    if (this.taskSessions.get(key) === session) this.taskSessions.delete(key);
   }
 
   async fetchBuffer(platform, url) {
@@ -88,8 +101,9 @@ export class BrowserManager {
   async close() {
     const contexts = await Promise.allSettled([...this.contexts.values()]);
     this.contexts.clear();
+    this.keepalivePages.clear();
+    this.taskSessions.clear();
     this.humanActionPages.clear();
-    this.claimedPages = new WeakSet();
     await Promise.allSettled(
       contexts.filter((item) => item.status === "fulfilled").map((item) => item.value.close()),
     );
@@ -128,6 +142,16 @@ export class BrowserManager {
     if (!context) {
       throw new Error("无法启动系统默认浏览器，也无法启动备用的谷歌浏览器或微软浏览器", { cause: launchError });
     }
+    let keepalivePage = (context.pages?.() ?? []).find((page) => page.url?.() === "about:blank");
+    keepalivePage ??= await context.newPage();
+    this.keepalivePages.set(platform, keepalivePage);
+    context.on?.("close", () => {
+      this.contexts.delete(platform);
+      this.keepalivePages.delete(platform);
+      for (const [key, session] of this.taskSessions) {
+        if (session.platform === platform) this.taskSessions.delete(key);
+      }
+    });
     return context;
   }
 }
