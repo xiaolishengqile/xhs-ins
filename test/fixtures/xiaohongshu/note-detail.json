@@ -1,0 +1,30 @@
+{
+  "data": {
+    "items": [
+      {
+        "note_card": {
+          "note_id": "note-image-1",
+          "type": "normal",
+          "title": "周末图片分享",
+          "desc": "第一行\n第二行",
+          "time": 1787788800000,
+          "user": { "nickname": "测试博主", "user_id": "user-1" },
+          "interact_info": {
+            "liked_count": "3.7万",
+            "collected_count": "1200",
+            "comment_count": "88"
+          },
+          "image_list": [
+            { "url_default": "https://sns-webpic-qc.xhscdn.com/image-1" },
+            {
+              "info_list": [
+                { "image_scene": "WB_PRV", "url": "https://sns-webpic-qc.xhscdn.com/image-2-preview" },
+                { "image_scene": "WB_DFT", "url": "https://sns-webpic-qc.xhscdn.com/image-2" }
+              ]
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

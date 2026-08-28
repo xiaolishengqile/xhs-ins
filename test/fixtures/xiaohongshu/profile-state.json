@@ -1,0 +1,41 @@
+{
+  "data": {
+    "notes": [
+      {
+        "note_id": "note-image-1",
+        "xsec_token": "token-image",
+        "note_card": {
+          "type": "normal",
+          "display_title": "周末图片分享",
+          "time": 1787788800000,
+          "user": { "nickname": "测试博主", "user_id": "user-1" },
+          "interact_info": { "liked_count": "3.7万", "sticky": false },
+          "cover": { "url_default": "https://sns-webpic-qc.xhscdn.com/cover-image" }
+        }
+      },
+      {
+        "id": "note-video-1",
+        "xsecToken": "token-video",
+        "noteCard": {
+          "type": "video",
+          "displayTitle": "一条视频",
+          "time": 1787702400000,
+          "user": { "nickname": "测试博主", "userId": "user-1" },
+          "interactInfo": { "likedCount": "120", "sticky": false },
+          "cover": { "urlDefault": "https://sns-webpic-qc.xhscdn.com/cover-video" }
+        }
+      },
+      {
+        "note_id": "note-old-1",
+        "xsec_token": "token-old",
+        "note_card": {
+          "type": "normal",
+          "display_title": "范围外旧笔记",
+          "time": 1764547200000,
+          "user": { "nickname": "测试博主", "user_id": "user-1" },
+          "interact_info": { "liked_count": "9", "sticky": false }
+        }
+      }
+    ]
+  }
+}
