@@ -187,3 +187,75 @@ test("批量删除只移除勾选的任务", async (t) => {
   await page.waitForFunction(() => document.querySelectorAll("[data-task-id]").length === 1);
   assert.equal(await page.locator("[data-task-id]").count(), 1);
 });
+
+test("上传链接文件会创建八个任务并保持五个并发", async (t) => {
+  const { manager, page, url } = await fixture(
+    t,
+    (_task, { signal }) => new Promise((_resolve, reject) => {
+      signal.addEventListener("abort", () => reject(new DOMException("已取消", "AbortError")), { once: true });
+    }),
+  );
+  await page.goto(url);
+  await page.getByLabel("链接文件").setInputFiles({
+    name: "links.txt",
+    mimeType: "text/plain",
+    buffer: Buffer.from(Array.from(
+      { length: 8 },
+      (_value, index) => `https://www.instagram.com/file_user_${index}/`,
+    ).join("\n")),
+  });
+
+  await page.getByRole("button", { name: "导入文件" }).click();
+
+  await page.waitForFunction(() => document.querySelectorAll('[data-status="running"]').length === 5);
+  assert.equal(manager.list().length, 8);
+  assert.equal(await page.locator('[data-status="queued"]').count(), 3);
+  await page.getByText("已创建 8 个任务").waitFor();
+});
+
+test("暂停全部会停止运行任务并在继续后恢复五个并发", async (t) => {
+  const { manager, page, url } = await fixture(
+    t,
+    (_task, { signal }) => new Promise((_resolve, reject) => {
+      signal.addEventListener("abort", () => reject(new DOMException("已取消", "AbortError")), { once: true });
+    }),
+  );
+  for (let index = 0; index < 6; index += 1) {
+    await manager.create({
+      url: `https://www.instagram.com/pause_user_${index}/`,
+      range: { preset: "week" },
+    });
+  }
+  await eventually(() => assert.equal(manager.controlStatus().running, 5));
+  await page.goto(url);
+
+  await page.getByRole("button", { name: "暂停全部" }).click();
+
+  await page.getByText("队列已暂停").waitFor();
+  assert.equal(await page.locator('[data-status="paused"]').count(), 5);
+  assert.equal(await page.locator('[data-status="queued"]').count(), 1);
+
+  await page.getByRole("button", { name: "继续全部" }).click();
+
+  await page.waitForFunction(() => document.querySelectorAll('[data-status="running"]').length === 5);
+  assert.equal(manager.controlStatus().paused, false);
+});
+
+test("汇总下载按钮显示完成数量且无结果时禁用", async (t) => {
+  const { manager, page, url } = await fixture(t, async (task) => ({ author: task.profileKey, notes: [] }));
+  await page.goto(url);
+  assert.equal(await page.getByRole("button", { name: "下载已完成任务（0）" }).isDisabled(), true);
+  await manager.create({
+    url: "https://www.instagram.com/all_download/",
+    range: { preset: "week" },
+  });
+  await eventually(() => assert.equal(manager.list()[0].status, "completed"));
+  await page.reload();
+  const downloadButton = page.getByRole("button", { name: "下载已完成任务（1）" });
+  assert.equal(await downloadButton.isDisabled(), false);
+
+  const downloadPromise = page.waitForEvent("download");
+  await downloadButton.click();
+  const download = await downloadPromise;
+  assert.equal(download.suggestedFilename(), "completed-tasks.zip");
+});

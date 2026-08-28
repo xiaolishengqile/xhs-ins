@@ -166,6 +166,7 @@ textarea:focus {
 }
 
 .primary-button,
+.secondary-button,
 .task-action {
   border: 0;
   border-radius: 12px;
@@ -190,6 +191,20 @@ textarea:focus {
   opacity: 0.6;
 }
 
+.secondary-button {
+  height: 48px;
+  border: 1px solid var(--line);
+  background: #fffdf8;
+  color: var(--ink);
+  padding: 0 20px;
+}
+
+.secondary-button:disabled,
+.task-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
 .custom-range {
   grid-column: 1 / -1;
   display: grid;
@@ -201,6 +216,21 @@ textarea:focus {
   display: none;
 }
 
+.file-import {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 10px 14px;
+  padding-top: 4px;
+}
+
+.file-help {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .form-message {
   min-height: 20px;
   margin: 14px 0 -4px;
@@ -210,7 +240,7 @@ textarea:focus {
 
 .overview {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 14px;
   margin: 18px 0 48px;
 }
@@ -231,6 +261,19 @@ textarea:focus {
 
 .metric-running strong {
   color: var(--green);
+}
+
+.metric-paused strong,
+.refresh-status.is-paused {
+  color: var(--amber);
+}
+
+.task-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .tasks-section {
@@ -312,6 +355,7 @@ textarea:focus {
 
 .task-card[data-status="running"]::before { background: var(--green); }
 .task-card[data-status="queued"]::before { background: var(--amber); }
+.task-card[data-status="paused"]::before { background: var(--blue); }
 .task-card[data-status="completed"]::before { background: var(--accent); }
 .task-card[data-status="failed"]::before,
 .task-card[data-status="cancelled"]::before { background: #837c74; }
@@ -342,6 +386,7 @@ textarea:focus {
 
 .task-card[data-status="running"] .status-pill { background: rgba(23, 122, 88, 0.1); color: var(--green); }
 .task-card[data-status="queued"] .status-pill { background: rgba(168, 101, 5, 0.1); color: var(--amber); }
+.task-card[data-status="paused"] .status-pill { background: rgba(49, 95, 145, 0.1); color: var(--blue); }
 .task-card[data-status="completed"] .status-pill { background: rgba(235, 76, 55, 0.1); color: var(--accent-dark); }
 
 .task-title {

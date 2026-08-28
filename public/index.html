@@ -59,6 +59,15 @@
               </label>
             </div>
 
+            <div class="file-import">
+              <label class="field">
+                <span>链接文件</span>
+                <input id="link-file" type="file" accept=".txt,.csv,text/plain,text/csv" />
+              </label>
+              <button id="import-links" class="secondary-button" type="button">导入文件</button>
+              <span class="file-help">支持文本或表格文件，最多 500 个唯一链接</span>
+            </div>
+
             <button class="primary-button" type="submit">开始采集</button>
           </form>
           <p id="form-message" class="form-message" role="status" aria-live="polite"></p>
@@ -77,6 +86,10 @@
             <span>已完成</span>
             <strong id="completed-summary">0</strong>
           </article>
+          <article class="metric-card metric-paused">
+            <span>已暂停</span>
+            <strong id="paused-summary">0</strong>
+          </article>
         </section>
 
         <section class="tasks-section" aria-labelledby="tasks-title">
@@ -85,7 +98,14 @@
               <p class="section-index">02</p>
               <h2 id="tasks-title">采集任务</h2>
             </div>
-            <span id="refresh-status" class="refresh-status">自动刷新</span>
+            <div class="task-controls">
+              <span id="scheduler-status" class="refresh-status">正常调度</span>
+              <button id="pause-all" class="task-action" type="button">暂停全部</button>
+              <button id="download-completed" class="task-action" type="button" disabled>
+                下载已完成任务（0）
+              </button>
+              <span id="refresh-status" class="refresh-status">自动刷新</span>
+            </div>
           </div>
           <div id="bulk-actions" class="bulk-actions" hidden>
             <label class="bulk-select-all">

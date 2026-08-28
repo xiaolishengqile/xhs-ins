@@ -1,3 +1,5 @@
+import { extractLinkEntries } from "/link-import.js";
+
 const form = document.querySelector("#task-form");
 const urlInput = document.querySelector("#profile-url");
 const presetInput = document.querySelector("#range-preset");
@@ -12,10 +14,16 @@ const bulkActions = document.querySelector("#bulk-actions");
 const selectAllTasks = document.querySelector("#select-all-tasks");
 const selectionCount = document.querySelector("#selection-count");
 const deleteSelected = document.querySelector("#delete-selected");
+const linkFile = document.querySelector("#link-file");
+const importLinks = document.querySelector("#import-links");
+const pauseAll = document.querySelector("#pause-all");
+const downloadCompleted = document.querySelector("#download-completed");
+const schedulerStatus = document.querySelector("#scheduler-status");
 
 const STATUS = {
   queued: "等待中",
   running: "运行中",
+  paused: "已暂停",
   waiting_user: "等待人工处理",
   completed: "已完成",
   failed: "失败",
@@ -27,6 +35,8 @@ let refreshAgain = false;
 let hasActiveTasks = false;
 let currentTasks = [];
 let bulkDeleting = false;
+let controlBusy = false;
+let currentControl = { paused: false, maxConcurrency: 5, running: 0, queued: 0, pausedTasks: 0 };
 const selectedTaskIds = new Set();
 
 function node(tag, className, text) {
@@ -93,7 +103,7 @@ function renderTask(task) {
 
   if (task.error) card.append(node("p", "task-error", task.error));
   const actions = node("div", "task-actions");
-  if (["queued", "running", "waiting_user"].includes(task.status)) actions.append(actionButton(task, "cancel", "取消"));
+  if (["queued", "running", "paused", "waiting_user"].includes(task.status)) actions.append(actionButton(task, "cancel", "取消"));
   if (["failed", "cancelled"].includes(task.status)) actions.append(actionButton(task, "retry", "重试"));
   if (task.status === "waiting_user") actions.append(actionButton(task, "resume", "我已处理，继续"));
   if (task.status === "completed") {
@@ -118,19 +128,28 @@ function updateBulkActions() {
   deleteSelected.disabled = bulkDeleting || selectedCount === 0;
 }
 
-function render(tasks) {
+function render(tasks, control = currentControl) {
   currentTasks = tasks;
+  currentControl = control;
   const availableIds = new Set(tasks.map((task) => task.id));
   for (const id of selectedTaskIds) {
     if (!availableIds.has(id)) selectedTaskIds.delete(id);
   }
-  hasActiveTasks = tasks.some((task) => ["queued", "running"].includes(task.status));
+  hasActiveTasks = control.paused || tasks.some((task) => ["queued", "running", "paused"].includes(task.status));
   const running = tasks.filter((task) => task.status === "running").length;
   const queued = tasks.filter((task) => task.status === "queued").length;
   const completed = tasks.filter((task) => task.status === "completed").length;
+  const paused = tasks.filter((task) => task.status === "paused").length;
   document.querySelector('[data-testid="running-summary"]').textContent = `${running} / 5`;
   document.querySelector("#queued-summary").textContent = String(queued);
   document.querySelector("#completed-summary").textContent = String(completed);
+  document.querySelector("#paused-summary").textContent = String(paused);
+  schedulerStatus.textContent = control.paused ? "队列已暂停" : "正常调度";
+  schedulerStatus.classList.toggle("is-paused", control.paused);
+  pauseAll.textContent = control.paused ? "继续全部" : "暂停全部";
+  pauseAll.disabled = controlBusy;
+  downloadCompleted.textContent = `下载已完成任务（${completed}）`;
+  downloadCompleted.disabled = completed === 0;
   emptyState.hidden = tasks.length > 0;
   taskList.replaceChildren(...tasks.map(renderTask));
   updateBulkActions();
@@ -145,7 +164,11 @@ function refresh() {
     do {
       refreshAgain = false;
       try {
-        render((await request("/api/tasks")).tasks);
+        const [taskResult, control] = await Promise.all([
+          request("/api/tasks"),
+          request("/api/control"),
+        ]);
+        render(taskResult.tasks, control);
         refreshStatus.textContent = `已更新 ${new Date().toLocaleTimeString("zh-CN", { hour12: false })}`;
       } catch (error) {
         refreshStatus.textContent = error.message;
@@ -164,6 +187,12 @@ presetInput.addEventListener("change", () => {
   dateTo.required = custom;
 });
 
+function selectedRange() {
+  const range = { preset: presetInput.value };
+  if (range.preset === "custom") Object.assign(range, { from: dateFrom.value, to: dateTo.value });
+  return range;
+}
+
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
   const button = form.querySelector('button[type="submit"]');
@@ -177,8 +206,7 @@ form.addEventListener("submit", async (event) => {
     message.textContent = "一次最多提交 5 条链接";
     return;
   }
-  const range = { preset: presetInput.value };
-  if (range.preset === "custom") Object.assign(range, { from: dateFrom.value, to: dateTo.value });
+  const range = selectedRange();
   button.disabled = true;
   message.textContent = `正在创建 ${urls.length} 个任务…`;
   try {
@@ -199,6 +227,58 @@ form.addEventListener("submit", async (event) => {
   } finally {
     button.disabled = false;
   }
+});
+
+importLinks.addEventListener("click", async () => {
+  const file = linkFile.files?.[0];
+  if (!file) {
+    message.textContent = "请选择链接文件";
+    return;
+  }
+  const entries = extractLinkEntries(await file.text());
+  if (entries.length === 0) {
+    message.textContent = "文件中没有找到链接";
+    return;
+  }
+  importLinks.disabled = true;
+  message.textContent = `正在导入 ${entries.length} 条链接…`;
+  try {
+    const result = await request("/api/tasks/batch", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ entries, range: selectedRange() }),
+    });
+    message.textContent = `已创建 ${result.tasks.length} 个任务，跳过 ${result.rejected.length} 个无效链接和 ${result.duplicates} 个重复链接。`;
+    linkFile.value = "";
+    await refresh();
+  } catch (error) {
+    message.textContent = error.message;
+  } finally {
+    importLinks.disabled = false;
+  }
+});
+
+pauseAll.addEventListener("click", async () => {
+  if (controlBusy) return;
+  controlBusy = true;
+  pauseAll.disabled = true;
+  try {
+    const action = currentControl.paused ? "resume" : "pause";
+    currentControl = await request(`/api/control/${action}`, { method: "POST" });
+    message.textContent = currentControl.paused
+      ? "已暂停正在运行的任务，队列已冻结。"
+      : "已继续全部任务，暂停任务将从头采集。";
+    await refresh();
+  } catch (error) {
+    message.textContent = error.message;
+  } finally {
+    controlBusy = false;
+    pauseAll.disabled = false;
+  }
+});
+
+downloadCompleted.addEventListener("click", () => {
+  if (!downloadCompleted.disabled) window.location.assign("/api/tasks/download-completed");
 });
 
 taskList.addEventListener("click", async (event) => {
