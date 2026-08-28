@@ -11,8 +11,10 @@ import { TaskStore } from "../../src/tasks/task-store.js";
 import { eventually } from "../helpers/eventually.js";
 import { readZipEntries } from "../helpers/zip.js";
 import { createLinkDocxBuffer } from "../helpers/docx.js";
+import { ApplicationController } from "../../src/application/controller.js";
+import { LoginRequiredError } from "../../src/collectors/errors.js";
 
-async function fixture(t, collect = async (task) => ({ author: task.profileKey, notes: [] })) {
+async function fixture(t, collect = async (task) => ({ author: task.profileKey, notes: [] }), options = {}) {
   const rootDir = await mkdtemp(path.join(tmpdir(), "collector-api-"));
   const manager = new TaskManager({
     store: new TaskStore(rootDir),
@@ -25,13 +27,19 @@ async function fixture(t, collect = async (task) => ({ author: task.profileKey, 
     now: () => new Date(2026, 7, 28, 12),
   });
   await manager.init();
-  const instance = await startServer({ handler: createApp({ manager }), port: 0 });
+  const browserManager = options.browserManager ?? {
+    close: async () => {},
+    openLogin: async () => {},
+    closeLogin: async () => {},
+  };
+  const controller = new ApplicationController({ manager, browserManager });
+  const instance = await startServer({ handler: createApp({ manager, controller }), port: 0 });
   t.after(async () => {
     await instance.close();
     await manager.shutdown();
     await rm(rootDir, { recursive: true, force: true });
   });
-  return { manager, ...instance };
+  return { manager, browserManager, ...instance };
 }
 
 async function json(response) {
@@ -248,7 +256,14 @@ test("文档上传接口会提取正文、表格和可点击链接", async (t) =
 });
 
 test("控制接口可以幂等暂停和继续调度器", async (t) => {
-  const { url } = await fixture(t);
+  let browserCloses = 0;
+  const { url } = await fixture(t, undefined, {
+    browserManager: {
+      close: async () => { browserCloses += 1; },
+      openLogin: async () => {},
+      closeLogin: async () => {},
+    },
+  });
 
   const initial = await json(await fetch(`${url}/api/control`));
   assert.equal(initial.response.status, 200);
@@ -258,17 +273,61 @@ test("控制接口可以幂等暂停和继续调度器", async (t) => {
     running: 0,
     queued: 0,
     pausedTasks: 0,
+    pending: 0,
+    blockedPlatforms: [],
   });
 
   const paused = await json(await fetch(`${url}/api/control/pause`, { method: "POST" }));
   const pausedAgain = await json(await fetch(`${url}/api/control/pause`, { method: "POST" }));
   assert.equal(paused.body.paused, true);
   assert.equal(pausedAgain.body.paused, true);
+  assert.equal(browserCloses, 2);
 
   const resumed = await json(await fetch(`${url}/api/control/resume`, { method: "POST" }));
   const resumedAgain = await json(await fetch(`${url}/api/control/resume`, { method: "POST" }));
   assert.equal(resumed.body.paused, false);
   assert.equal(resumedAgain.body.paused, false);
+});
+
+test("登录接口只在用户点击后打开窗口并在完成后恢复平台任务", async (t) => {
+  let requiresLogin = true;
+  const events = [];
+  const { url, manager } = await fixture(
+    t,
+    async (task) => {
+      if (requiresLogin) throw new LoginRequiredError();
+      return { author: task.profileKey, notes: [] };
+    },
+    {
+      browserManager: {
+        close: async () => {},
+        openLogin: async (platform) => events.push(`open:${platform}`),
+        closeLogin: async (platform) => events.push(`close:${platform}`),
+      },
+    },
+  );
+  const created = await (
+    await fetch(`${url}/api/tasks`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        url: "https://www.instagram.com/login_user/",
+        range: { preset: "week" },
+      }),
+    })
+  ).json();
+  await fetch(`${url}/api/tasks/${created.task.id}/start`, { method: "POST" });
+  await eventually(() => assert.equal(manager.get(created.task.id).status, "waiting_user"));
+
+  const opened = await fetch(`${url}/api/tasks/${created.task.id}/login`, { method: "POST" });
+  assert.equal(opened.status, 200);
+  assert.deepEqual(events, ["open:instagram"]);
+
+  requiresLogin = false;
+  const resumed = await fetch(`${url}/api/tasks/${created.task.id}/resume`, { method: "POST" });
+  assert.equal(resumed.status, 200);
+  assert.deepEqual(events, ["open:instagram", "close:instagram"]);
+  await eventually(() => assert.equal(manager.get(created.task.id).status, "completed"));
 });
 
 test("汇总下载包含点击时所有可用的完成任务", async (t) => {

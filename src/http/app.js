@@ -28,7 +28,7 @@ function sendJson(response, statusCode, value) {
 function statusForError(error) {
   if (error.statusCode) return error.statusCode;
   if (error.message === "任务不存在") return 404;
-  if (/只有|不需要人工恢复/.test(error.message)) return 409;
+  if (/只有|不需要人工/.test(error.message)) return 409;
   return 400;
 }
 
@@ -51,7 +51,7 @@ async function sendStatic(response, publicDir, pathname) {
   return true;
 }
 
-async function handleRequest(request, response, { manager, publicDir }) {
+async function handleRequest(request, response, { manager, controller, publicDir }) {
   const url = new URL(request.url, "http://127.0.0.1");
   const { pathname } = url;
 
@@ -80,10 +80,10 @@ async function handleRequest(request, response, { manager, publicDir }) {
     return sendJson(response, 200, { entries });
   }
   if (request.method === "POST" && pathname === "/api/control/pause") {
-    return sendJson(response, 200, await manager.pauseAll());
+    return sendJson(response, 200, await controller.pauseAll());
   }
   if (request.method === "POST" && pathname === "/api/control/resume") {
-    return sendJson(response, 200, await manager.resumeAll());
+    return sendJson(response, 200, await controller.resumeAll());
   }
   if (request.method === "GET" && pathname === "/api/tasks/download-completed") {
     const archive = await createCompletedArchive(manager.list());
@@ -110,7 +110,7 @@ async function handleRequest(request, response, { manager, publicDir }) {
     return sendJson(response, 200, await manager.startBatch(ids));
   }
 
-  const taskMatch = pathname.match(/^\/api\/tasks\/([0-9a-f-]+)(?:\/(start|cancel|retry|resume|download))?$/i);
+  const taskMatch = pathname.match(/^\/api\/tasks\/([0-9a-f-]+)(?:\/(start|cancel|retry|login|resume|download))?$/i);
   if (taskMatch) {
     const [, id, action] = taskMatch;
     const task = manager.get(id);
@@ -120,7 +120,13 @@ async function handleRequest(request, response, { manager, publicDir }) {
       await manager.delete(id);
       return sendJson(response, 200, { deleted: true });
     }
-    if (["start", "cancel", "retry", "resume"].includes(action) && request.method === "POST") {
+    if (action === "login" && request.method === "POST") {
+      return sendJson(response, 200, { task: await controller.openLogin(id) });
+    }
+    if (action === "resume" && request.method === "POST") {
+      return sendJson(response, 200, { task: await controller.completeLogin(id) });
+    }
+    if (["start", "cancel", "retry"].includes(action) && request.method === "POST") {
       const updated = await manager[action](id);
       return sendJson(response, 200, { task: updated });
     }
@@ -149,9 +155,9 @@ async function handleRequest(request, response, { manager, publicDir }) {
   sendJson(response, 404, { error: "请求地址不存在" });
 }
 
-export function createApp({ manager, publicDir = DEFAULT_PUBLIC_DIR }) {
+export function createApp({ manager, controller = manager, publicDir = DEFAULT_PUBLIC_DIR }) {
   return (request, response) => {
-    handleRequest(request, response, { manager, publicDir }).catch((error) => {
+    handleRequest(request, response, { manager, controller, publicDir }).catch((error) => {
       if (!response.headersSent) sendJson(response, statusForError(error), { error: error.message || "请求失败" });
       else response.destroy(error);
     });

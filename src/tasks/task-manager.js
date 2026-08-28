@@ -41,6 +41,8 @@ export class TaskManager {
     this.runningPromises = new Set();
     this.taskRuns = new Map();
     this.pauseRequested = new Set();
+    this.humanActionRequested = new Set();
+    this.blockedPlatforms = new Set();
     this.paused = false;
     this.closed = false;
   }
@@ -60,6 +62,7 @@ export class TaskManager {
       }
       if (task.status !== previousStatus) await this.store.save(task);
       if (task.status === TASK_STATUS.QUEUED) this.queue.push(task.id);
+      if (task.status === TASK_STATUS.WAITING_USER) this.blockedPlatforms.add(task.platform);
       this.tasks.set(task.id, task);
     }
     this.#requestSchedule();
@@ -97,6 +100,13 @@ export class TaskManager {
     if (this.paused) throw new Error("调度器已暂停，请先继续调度");
     const task = this.#requireTask(id);
     if (task.status !== TASK_STATUS.PENDING) throw new Error("只有待开始任务可以启动");
+    if (this.blockedPlatforms.has(task.platform)) {
+      task.status = TASK_STATUS.WAITING_USER;
+      task.progress.stage = "等待平台登录或验证";
+      task.updatedAt = this.now().toISOString();
+      await this.store.save(task);
+      return clone(task);
+    }
     return this.#requeue(task, "等待采集");
   }
 
@@ -111,7 +121,7 @@ export class TaskManager {
         skipped.push(id);
         continue;
       }
-      await this.#requeue(task, "等待采集");
+      await this.start(id);
       started.push(id);
     }
     return { started, skipped };
@@ -159,6 +169,8 @@ export class TaskManager {
       running: tasks.filter((task) => task.status === TASK_STATUS.RUNNING).length,
       queued: tasks.filter((task) => task.status === TASK_STATUS.QUEUED).length,
       pausedTasks: tasks.filter((task) => task.status === TASK_STATUS.PAUSED).length,
+      pending: tasks.filter((task) => task.status === TASK_STATUS.PENDING).length,
+      blockedPlatforms: [...this.blockedPlatforms],
     };
   }
 
@@ -243,7 +255,23 @@ export class TaskManager {
   async resume(id) {
     const task = this.#requireTask(id);
     if (task.status !== TASK_STATUS.WAITING_USER) throw new Error("该任务不需要人工恢复");
-    return this.#requeue(task, "等待恢复");
+    await this.resumePlatform(task.platform);
+    return this.get(id);
+  }
+
+  async prepareHumanAction(platform) {
+    await this.#blockPlatform(platform);
+    return this.controlStatus();
+  }
+
+  async resumePlatform(platform) {
+    if (this.paused) throw new Error("调度器已暂停，请先继续调度");
+    this.blockedPlatforms.delete(platform);
+    const tasks = [...this.tasks.values()].filter(
+      (task) => task.platform === platform && task.status === TASK_STATUS.WAITING_USER,
+    );
+    for (const task of tasks) await this.#requeue(task, "等待恢复");
+    return tasks.map((task) => clone(task));
   }
 
   async delete(id) {
@@ -288,7 +316,12 @@ export class TaskManager {
   #schedule() {
     if (this.closed || this.paused) return;
     while (this.running.size < this.maxConcurrency && this.queue.length > 0) {
-      const id = this.queue.shift();
+      const runnableIndex = this.queue.findIndex((id) => {
+        const task = this.tasks.get(id);
+        return task?.status === TASK_STATUS.QUEUED && !this.blockedPlatforms.has(task.platform);
+      });
+      if (runnableIndex < 0) return;
+      const [id] = this.queue.splice(runnableIndex, 1);
       const task = this.tasks.get(id);
       if (!task || task.status !== TASK_STATUS.QUEUED) continue;
       const promise = this.#run(task);
@@ -341,14 +374,24 @@ export class TaskManager {
     } catch (error) {
       if (controller.signal.aborted || error?.name === "AbortError") {
         const paused = this.pauseRequested.has(task.id);
-        task.status = paused ? TASK_STATUS.PAUSED : TASK_STATUS.CANCELLED;
-        task.error = null;
-        task.progress.stage = paused ? "已暂停" : "已取消";
+        const waitingForHuman = this.humanActionRequested.has(task.id);
+        task.status = waitingForHuman
+          ? TASK_STATUS.WAITING_USER
+          : paused
+            ? TASK_STATUS.PAUSED
+            : TASK_STATUS.CANCELLED;
+        task.error = waitingForHuman ? "该平台需要先完成登录或验证" : null;
+        task.progress.stage = waitingForHuman
+          ? "等待平台登录或验证"
+          : paused
+            ? "已暂停"
+            : "已取消";
       } else if (error?.code === "HUMAN_ACTION_REQUIRED") {
         preserveHumanAction = true;
         task.status = TASK_STATUS.WAITING_USER;
         task.error = errorMessage(error);
         task.progress.stage = "等待人工登录或验证";
+        await this.#blockPlatform(task.platform, task.id);
       } else {
         task.status = TASK_STATUS.FAILED;
         task.error = errorMessage(error);
@@ -357,10 +400,33 @@ export class TaskManager {
     } finally {
       await browserSession?.close({ preserveHumanAction }).catch(() => {});
       this.pauseRequested.delete(task.id);
+      this.humanActionRequested.delete(task.id);
       task.updatedAt = this.now().toISOString();
       this.running.delete(task.id);
       await this.store.save(task);
       this.#requestSchedule();
     }
+  }
+
+  async #blockPlatform(platform, sourceId) {
+    this.blockedPlatforms.add(platform);
+    const runningPromises = [];
+    for (const task of this.tasks.values()) {
+      if (task.id === sourceId || task.platform !== platform) continue;
+      if (task.status === TASK_STATUS.QUEUED) {
+        this.queue = this.queue.filter((id) => id !== task.id);
+        task.status = TASK_STATUS.WAITING_USER;
+        task.error = "该平台需要先完成登录或验证";
+        task.progress.stage = "等待平台登录或验证";
+        task.updatedAt = this.now().toISOString();
+        await this.store.save(task);
+      } else if (task.status === TASK_STATUS.RUNNING) {
+        this.humanActionRequested.add(task.id);
+        this.running.get(task.id)?.abort();
+        const runningPromise = this.taskRuns.get(task.id);
+        if (runningPromise) runningPromises.push(runningPromise);
+      }
+    }
+    await Promise.allSettled(runningPromises);
   }
 }

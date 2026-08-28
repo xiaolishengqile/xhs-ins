@@ -217,17 +217,29 @@ test("应用重启后会恢复未完成任务", async (t) => {
   await eventually(() => assert.equal(manager.list()[0].status, "completed"));
 });
 
-test("等待人工登录的任务会释放并发名额", async (t) => {
+test("需要登录时同平台任务统一等待且另一平台继续运行", async (t) => {
+  let requiresLogin = true;
   const manager = await managerFixture(t, async (task) => {
-    if (task.profileKey === "user0") throw new LoginRequiredError();
+    if (task.profileKey === "user0" && requiresLogin) throw new LoginRequiredError();
     return { author: task.profileKey, notes: [] };
   }, { maxConcurrency: 1 });
   const waiting = await manager.create(input(0));
-  const next = await manager.create(input(1));
-  await manager.startBatch([waiting.id, next.id]);
+  const samePlatform = await manager.create(input(1));
+  const otherPlatform = await manager.create({
+    url: "https://www.instagram.com/other_platform/",
+    range: { preset: "week" },
+  });
+  await manager.startBatch([waiting.id, samePlatform.id, otherPlatform.id]);
 
   await eventually(() => assert.equal(manager.get(waiting.id).status, "waiting_user"));
-  await eventually(() => assert.equal(manager.get(next.id).status, "completed"));
+  await eventually(() => assert.equal(manager.get(samePlatform.id).status, "waiting_user"));
+  await eventually(() => assert.equal(manager.get(otherPlatform.id).status, "completed"));
+
+  requiresLogin = false;
+  await manager.resumePlatform("xiaohongshu");
+
+  await eventually(() => assert.equal(manager.get(waiting.id).status, "completed"));
+  await eventually(() => assert.equal(manager.get(samePlatform.id).status, "completed"));
 });
 
 test("导出阶段可以更新图片下载进度", async (t) => {
