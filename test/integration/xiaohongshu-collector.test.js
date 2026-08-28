@@ -98,13 +98,20 @@ test("主页没有可用笔记编号且显示登录提示时等待人工登录",
     item.id = "";
   }
   const page = new FakePage({ profile, bodyText: "扫码登录后查看更多内容" });
-  const collector = new XiaohongshuCollector({ browserManager: { newPage: async () => page } });
+  let retainedPage;
+  const collector = new XiaohongshuCollector({
+    browserManager: {
+      newPage: async () => page,
+      retainPageForHumanAction: async (_platform, value) => { retainedPage = value; },
+    },
+  });
 
   await assert.rejects(
     () => collector.collect(task(), { signal: new AbortController().signal, onProgress: async () => {} }),
     LoginRequiredError,
   );
-  assert.equal(page.closed, true);
+  assert.equal(retainedPage, page);
+  assert.equal(page.closed, false);
 });
 
 test("开始采集前取消会立即终止", async () => {

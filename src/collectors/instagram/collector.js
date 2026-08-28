@@ -35,6 +35,42 @@ function mergeVisibleImages(note, images) {
   return note;
 }
 
+async function readPostDetail(page, signal) {
+  const images = new Set();
+  let html = "";
+  let bodyText = "";
+  let previousSnapshot = "";
+  let unchangedRounds = 0;
+
+  for (let step = 0; step < 50 && unchangedRounds < 2; step += 1) {
+    throwIfAborted(signal);
+    const snapshot = await page.evaluate(() => ({
+      html: document.documentElement.outerHTML,
+      bodyText: document.body?.innerText ?? "",
+      images: [...document.querySelectorAll("article img")]
+        .filter((image) => image.naturalWidth >= 200 || image.width >= 200)
+        .map((image) => image.currentSrc || image.src),
+    }));
+    html ||= snapshot.html;
+    bodyText = snapshot.bodyText;
+    checkPageText(bodyText, true);
+    for (const url of snapshot.images ?? []) images.add(url);
+
+    const signature = (snapshot.images ?? []).join("|");
+    unchangedRounds = signature === previousSnapshot ? unchangedRounds + 1 : 0;
+    previousSnapshot = signature;
+
+    const nextButton = page.locator(
+      'article button[aria-label="Next"], article button[aria-label="下一步"], article button[aria-label="下一张"]',
+    ).last();
+    if ((await nextButton.count()) === 0 || !(await nextButton.isVisible())) break;
+    await nextButton.click();
+    await page.waitForTimeout(400);
+  }
+
+  return { html, bodyText, images: [...images] };
+}
+
 export class InstagramCollector {
   constructor({ browserManager }) {
     this.browserManager = browserManager;
@@ -44,6 +80,8 @@ export class InstagramCollector {
     throwIfAborted(signal);
     const profilePage = await this.browserManager.newPage("instagram");
     let detailPage;
+    let activePage = profilePage;
+    let retainedPage = null;
     try {
       detailPage = await this.browserManager.newPage("instagram");
       await profilePage.goto(task.profileUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
@@ -57,6 +95,7 @@ export class InstagramCollector {
 
       while (unchangedRounds < 2 && !stop) {
         throwIfAborted(signal);
+        activePage = profilePage;
         const snapshot = await profilePage.evaluate(() => ({
           links: [...document.querySelectorAll('a[href^="/p/"], a[href^="/reel/"]')].map((item) => item.href),
           bodyText: document.body?.innerText ?? "",
@@ -70,16 +109,10 @@ export class InstagramCollector {
 
         for (const url of fresh) {
           throwIfAborted(signal);
+          activePage = detailPage;
           await detailPage.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
           await detailPage.waitForTimeout(600);
-          const detail = await detailPage.evaluate(() => ({
-            html: document.documentElement.outerHTML,
-            bodyText: document.body?.innerText ?? "",
-            images: [...document.querySelectorAll("article img")]
-              .filter((image) => image.naturalWidth >= 200 || image.width >= 200)
-              .map((image) => image.currentSrc || image.src),
-          }));
-          checkPageText(detail.bodyText, true);
+          const detail = await readPostDetail(detailPage, signal);
           const note = mergeVisibleImages(parseInstagramPostHtml(detail.html, url), detail.images ?? []);
           author = note.author || author;
           if (isInRange(note.publishedAt, task.from, task.to)) {
@@ -96,13 +129,22 @@ export class InstagramCollector {
         }
 
         if (!stop && unchangedRounds < 2) {
+          activePage = profilePage;
           await profilePage.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
           await profilePage.waitForTimeout(800);
         }
       }
+      await this.browserManager.closeHumanActionPages?.("instagram");
       return { author, notes };
+    } catch (error) {
+      if (error?.code === "HUMAN_ACTION_REQUIRED") {
+        retainedPage = activePage;
+        await this.browserManager.retainPageForHumanAction?.("instagram", activePage);
+      }
+      throw error;
     } finally {
-      await Promise.allSettled([profilePage?.close(), detailPage?.close()].filter(Boolean));
+      const pagesToClose = [profilePage, detailPage].filter((page) => page && page !== retainedPage);
+      await Promise.allSettled(pagesToClose.map((page) => page.close()));
     }
   }
 }

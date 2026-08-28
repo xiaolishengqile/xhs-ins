@@ -44,6 +44,7 @@ export class XiaohongshuCollector {
       pending.finally(() => pendingResponses.delete(pending));
     };
     page.on?.("response", responseListener);
+    let retainedForHumanAction = false;
 
     try {
       await page.goto(task.profileUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
@@ -112,10 +113,17 @@ export class XiaohongshuCollector {
         await onProgress({ stage: "读取笔记详情", current: index + 1, total: selected.length });
       }
 
+      await this.browserManager.closeHumanActionPages?.("xiaohongshu");
       return { author: author || notes[0]?.author || task.profileKey, notes };
+    } catch (error) {
+      if (error?.code === "HUMAN_ACTION_REQUIRED") {
+        retainedForHumanAction = true;
+        await this.browserManager.retainPageForHumanAction?.("xiaohongshu", page);
+      }
+      throw error;
     } finally {
       page.off?.("response", responseListener);
-      await page.close();
+      if (!retainedForHumanAction) await page.close();
     }
   }
 }

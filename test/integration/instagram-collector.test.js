@@ -30,18 +30,34 @@ class DetailPage {
   constructor(details) {
     this.details = details;
     this.currentUrl = "";
+    this.currentIndex = 0;
     this.closed = false;
   }
 
   async goto(url) {
     this.currentUrl = url;
+    this.currentIndex = 0;
   }
 
   async evaluate() {
-    return this.details[this.currentUrl];
+    const value = this.details[this.currentUrl];
+    return Array.isArray(value) ? value[this.currentIndex] : value;
   }
 
   async waitForTimeout() {}
+
+  locator() {
+    const page = this;
+    return {
+      last() { return this; },
+      async count() {
+        const value = page.details[page.currentUrl];
+        return Array.isArray(value) && page.currentIndex < value.length - 1 ? 1 : 0;
+      },
+      async isVisible() { return true; },
+      async click() { page.currentIndex += 1; },
+    };
+  }
 
   async close() {
     this.closed = true;
@@ -101,11 +117,49 @@ test("公开主页被登录墙遮挡时等待人工登录", async () => {
   const profilePage = new ProfilePage([], "Log in to see photos and videos");
   const detailPage = new DetailPage({});
   const pages = [profilePage, detailPage];
-  const collector = new InstagramCollector({ browserManager: { newPage: async () => pages.shift() } });
+  let retainedPage;
+  const collector = new InstagramCollector({
+    browserManager: {
+      newPage: async () => pages.shift(),
+      retainPageForHumanAction: async (_platform, value) => { retainedPage = value; },
+    },
+  });
 
   await assert.rejects(
     () => collector.collect(task(), { signal: new AbortController().signal, onProgress: async () => {} }),
     LoginRequiredError,
+  );
+  assert.equal(retainedPage, profilePage);
+  assert.equal(profilePage.closed, false);
+  assert.equal(detailPage.closed, true);
+});
+
+test("轮播帖子会点击下一张并收集后续加载图片", async () => {
+  const html = await readFile(new URL("../fixtures/instagram/post.html", import.meta.url), "utf8");
+  const postUrl = "https://www.instagram.com/p/shortcode-1/";
+  const profilePage = new ProfilePage([postUrl]);
+  const detailPage = new DetailPage({
+    [postUrl]: [
+      { html, bodyText: "Public post", images: ["https://scontent.cdninstagram.com/photo-1.jpg"] },
+      { html, bodyText: "Public post", images: ["https://scontent.cdninstagram.com/photo-2.jpg"] },
+      { html, bodyText: "Public post", images: ["https://scontent.cdninstagram.com/photo-3.jpg"] },
+    ],
+  });
+  const pages = [profilePage, detailPage];
+  const collector = new InstagramCollector({ browserManager: { newPage: async () => pages.shift() } });
+
+  const result = await collector.collect(task(), {
+    signal: new AbortController().signal,
+    onProgress: async () => {},
+  });
+
+  assert.deepEqual(
+    result.notes[0].media.map((item) => item.url),
+    [
+      "https://scontent.cdninstagram.com/photo-1.jpg",
+      "https://scontent.cdninstagram.com/photo-2.jpg",
+      "https://scontent.cdninstagram.com/photo-3.jpg",
+    ],
   );
 });
 

@@ -16,7 +16,7 @@ test("同一平台的多个页面复用一个持久浏览器会话", async (t) =
   let contextClosed = false;
   const context = {
     newPage: async () => {
-      const page = { close: async () => {} };
+      const page = { closed: false, close: async () => { page.closed = true; } };
       pages.push(page);
       return page;
     },
@@ -42,6 +42,26 @@ test("同一平台的多个页面复用一个持久浏览器会话", async (t) =
   assert.equal(pages.length, 2);
   assert.equal(contextClosed, false);
   assert.equal(second, pages[1]);
+});
+
+test("人工处理页面会保持打开并可在恢复成功后统一关闭", async (t) => {
+  const profilesDir = await mkdtemp(path.join(tmpdir(), "collector-browser-"));
+  t.after(() => rm(profilesDir, { recursive: true, force: true }));
+  const page = { closed: false, close: async () => { page.closed = true; } };
+  const manager = new BrowserManager({
+    profilesDir,
+    launchPersistentContext: async () => ({
+      newPage: async () => page,
+      request: { get: async () => ({ ok: () => true, body: async () => Buffer.from("image") }) },
+      close: async () => {},
+    }),
+  });
+  t.after(() => manager.close());
+
+  await manager.retainPageForHumanAction("xiaohongshu", page);
+  assert.equal(page.closed, false);
+  await manager.closeHumanActionPages("xiaohongshu");
+  assert.equal(page.closed, true);
 });
 
 test("媒体下载只允许对应平台的公开图片域名", async (t) => {

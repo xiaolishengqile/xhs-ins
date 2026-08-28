@@ -44,6 +44,7 @@ export class BrowserManager {
     this.headless = headless;
     this.launchPersistentContext = launchPersistentContext;
     this.contexts = new Map();
+    this.humanActionPages = new Map();
   }
 
   async newPage(platform) {
@@ -57,9 +58,22 @@ export class BrowserManager {
     return response.body();
   }
 
+  async retainPageForHumanAction(platform, page) {
+    if (!MEDIA_HOSTS[platform]) throw new Error(`不支持的平台：${platform}`);
+    if (!this.humanActionPages.has(platform)) this.humanActionPages.set(platform, new Set());
+    this.humanActionPages.get(platform).add(page);
+  }
+
+  async closeHumanActionPages(platform) {
+    const pages = [...(this.humanActionPages.get(platform) ?? [])];
+    this.humanActionPages.delete(platform);
+    await Promise.allSettled(pages.map((page) => page.close()));
+  }
+
   async close() {
     const contexts = await Promise.allSettled([...this.contexts.values()]);
     this.contexts.clear();
+    this.humanActionPages.clear();
     await Promise.allSettled(
       contexts.filter((item) => item.status === "fulfilled").map((item) => item.value.close()),
     );

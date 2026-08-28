@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { toCsv } from "../../src/export/csv.js";
-import { safeFileName } from "../../src/export/file-names.js";
+import { mediaExtension, safeFileName } from "../../src/export/file-names.js";
 import { downloadMedia } from "../../src/export/media-downloader.js";
 import { createTaskArchive } from "../../src/export/archive.js";
 
@@ -33,6 +33,13 @@ test("数据表正确转义中文标题、逗号和换行", () => {
 test("文件名会移除系统不允许的字符", () => {
   assert.equal(safeFileName(' 景甜:周末/分享?* '), "景甜-周末-分享");
   assert.equal(safeFileName("..."), "未命名");
+});
+
+test("小红书图片路径标记可以识别真实图片格式", () => {
+  assert.equal(
+    mediaExtension("https://sns-webpic-qc.xhscdn.com/photo!nc_n_nwebp_mw_1"),
+    ".webp",
+  );
 });
 
 test("重复图片只下载一次且单图失败不会中断其他图片", async (t) => {

@@ -11,7 +11,10 @@ export function safeFileName(value, fallback = "未命名") {
 
 export function mediaExtension(url) {
   try {
-    const match = new URL(url).pathname.match(/\.(jpe?g|png|webp|gif|avif)$/i);
+    const parsed = new URL(url);
+    const formatHint = `${parsed.pathname}${parsed.search}`.match(/(?:format[/=]|n)(jpe?g|png|webp|gif|avif)(?:\b|_)/i);
+    if (formatHint) return `.${formatHint[1].toLowerCase().replace("jpeg", "jpg")}`;
+    const match = parsed.pathname.match(/\.(jpe?g|png|webp|gif|avif)$/i);
     if (!match) return ".jpg";
     return `.${match[1].toLowerCase().replace("jpeg", "jpg")}`;
   } catch {
