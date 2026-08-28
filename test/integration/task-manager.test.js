@@ -7,6 +7,7 @@ import path from "node:path";
 import { eventually } from "../helpers/eventually.js";
 import { TaskManager } from "../../src/tasks/task-manager.js";
 import { TaskStore } from "../../src/tasks/task-store.js";
+import { SchedulerStateStore } from "../../src/tasks/scheduler-state-store.js";
 import { LoginRequiredError } from "../../src/collectors/errors.js";
 
 function input(index) {
@@ -277,4 +278,98 @@ test("等待人工处理任务只保留验证页面", async (t) => {
   await eventually(() => assert.equal(manager.get(created.id).status, "waiting_user"));
 
   assert.deepEqual(closeOptions, [{ preserveHumanAction: true }]);
+});
+
+test("暂停全部会停止运行任务并冻结队列直到继续", async (t) => {
+  const runs = new Map();
+  const controlStates = [];
+  const controlStore = {
+    load: async () => ({ paused: false, updatedAt: null }),
+    save: async (state) => controlStates.push(structuredClone(state)),
+  };
+  const manager = await managerFixture(
+    t,
+    async (task, { signal }) => {
+      const count = (runs.get(task.id) ?? 0) + 1;
+      runs.set(task.id, count);
+      if (task.profileKey === "user0" && count === 1) {
+        await new Promise((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(new DOMException("已取消", "AbortError")), { once: true });
+        });
+      }
+      return { author: task.profileKey, notes: [] };
+    },
+    { maxConcurrency: 1, controlStore },
+  );
+  const first = await manager.create(input(0));
+  const second = await manager.create(input(1));
+  await eventually(() => assert.equal(manager.get(first.id).status, "running"));
+  await eventually(() => assert.equal(runs.get(first.id), 1));
+
+  const paused = await manager.pauseAll();
+
+  assert.equal(paused.paused, true);
+  assert.equal(manager.get(first.id).status, "paused");
+  assert.equal(manager.get(second.id).status, "queued");
+  assert.equal(runs.has(second.id), false);
+  assert.equal(manager.controlStatus().queued, 1);
+  assert.equal(manager.controlStatus().pausedTasks, 1);
+
+  const resumed = await manager.resumeAll();
+
+  assert.equal(resumed.paused, false);
+  await eventually(() => assert.deepEqual(manager.list().map((task) => task.status), ["completed", "completed"]));
+  assert.equal(runs.get(first.id), 2);
+  assert.equal(runs.get(second.id), 1);
+  assert.deepEqual(controlStates.map((state) => state.paused), [true, false]);
+});
+
+test("服务重启后保持暂停且运行中任务转为已暂停", async (t) => {
+  const rootDir = await mkdtemp(path.join(tmpdir(), "collector-paused-restart-"));
+  const taskStore = new TaskStore(path.join(rootDir, "tasks"));
+  const controlStore = new SchedulerStateStore(path.join(rootDir, "scheduler.json"));
+  const savedTask = {
+    id: "123e4567-e89b-12d3-a456-426614174000",
+    platform: "xiaohongshu",
+    profileUrl: "https://www.xiaohongshu.com/user/profile/restart-paused",
+    profileKey: "restart-paused",
+    from: "2026-08-22T00:00:00.000Z",
+    to: "2026-08-28T23:59:59.999Z",
+    status: "running",
+    progress: { stage: "正在采集", current: 1, total: 2, imagesDownloaded: 0 },
+    author: null,
+    error: null,
+    resultPath: null,
+    createdAt: "2026-08-28T00:00:00.000Z",
+    updatedAt: "2026-08-28T01:00:00.000Z",
+    startedAt: "2026-08-28T01:00:00.000Z",
+    completedAt: null,
+  };
+  await taskStore.save(savedTask);
+  await controlStore.save({ paused: true, updatedAt: "2026-08-28T12:00:00.000Z" });
+  let runs = 0;
+  const manager = new TaskManager({
+    store: taskStore,
+    controlStore,
+    collectorFactory: () => ({
+      collect: async () => {
+        runs += 1;
+        return { author: "恢复任务", notes: [] };
+      },
+    }),
+    exporter: async () => path.join(rootDir, "result.zip"),
+  });
+  t.after(async () => {
+    await manager.shutdown();
+    await rm(rootDir, { recursive: true, force: true });
+  });
+
+  await manager.init();
+
+  assert.equal(manager.get(savedTask.id).status, "paused");
+  assert.equal(manager.controlStatus().paused, true);
+  assert.equal(runs, 0);
+  await manager.resumeAll();
+  await eventually(() => assert.equal(manager.get(savedTask.id).status, "completed"));
+  assert.equal(runs, 1);
 });

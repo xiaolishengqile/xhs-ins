@@ -18,6 +18,10 @@ export class TaskManager {
     collectorFactory,
     exporter,
     taskSessionFactory = async () => null,
+    controlStore = {
+      load: async () => ({ paused: false, updatedAt: null }),
+      save: async () => {},
+    },
     maxConcurrency = 5,
     now = () => new Date(),
     idFactory = randomUUID,
@@ -26,6 +30,7 @@ export class TaskManager {
     this.collectorFactory = collectorFactory;
     this.exporter = exporter;
     this.taskSessionFactory = taskSessionFactory;
+    this.controlStore = controlStore;
     this.maxConcurrency = maxConcurrency;
     this.now = now;
     this.idFactory = idFactory;
@@ -34,18 +39,26 @@ export class TaskManager {
     this.running = new Map();
     this.runningPromises = new Set();
     this.taskRuns = new Map();
+    this.pauseRequested = new Set();
+    this.paused = false;
     this.closed = false;
   }
 
   async init() {
+    this.paused = (await this.controlStore.load()).paused === true;
     for (const task of await this.store.loadAll()) {
-      if (RESTARTABLE_STATUS.has(task.status)) {
+      const previousStatus = task.status;
+      if (task.status === TASK_STATUS.RUNNING) {
+        task.status = this.paused ? TASK_STATUS.PAUSED : TASK_STATUS.QUEUED;
+      } else if (task.status === TASK_STATUS.PAUSED && !this.paused) {
         task.status = TASK_STATUS.QUEUED;
+      }
+      if (task.status === TASK_STATUS.QUEUED && RESTARTABLE_STATUS.has(previousStatus)) {
         task.error = null;
         task.progress = { ...task.progress, stage: "等待恢复" };
-        await this.store.save(task);
-        this.queue.push(task.id);
       }
+      if (task.status !== previousStatus) await this.store.save(task);
+      if (task.status === TASK_STATUS.QUEUED) this.queue.push(task.id);
       this.tasks.set(task.id, task);
     }
     this.#requestSchedule();
@@ -89,6 +102,62 @@ export class TaskManager {
   get(id) {
     const task = this.tasks.get(id);
     return task ? clone(task) : null;
+  }
+
+  controlStatus() {
+    const tasks = [...this.tasks.values()];
+    return {
+      paused: this.paused,
+      maxConcurrency: this.maxConcurrency,
+      running: tasks.filter((task) => task.status === TASK_STATUS.RUNNING).length,
+      queued: tasks.filter((task) => task.status === TASK_STATUS.QUEUED).length,
+      pausedTasks: tasks.filter((task) => task.status === TASK_STATUS.PAUSED).length,
+    };
+  }
+
+  async pauseAll() {
+    if (this.closed) throw new Error("任务管理器已关闭");
+    if (!this.paused) {
+      this.paused = true;
+      try {
+        await this.controlStore.save({ paused: true, updatedAt: this.now().toISOString() });
+      } catch (error) {
+        this.paused = false;
+        this.#requestSchedule();
+        throw error;
+      }
+    }
+    const runningPromises = [];
+    for (const [id, controller] of this.running) {
+      this.pauseRequested.add(id);
+      controller.abort();
+      const runningPromise = this.taskRuns.get(id);
+      if (runningPromise) runningPromises.push(runningPromise);
+    }
+    await Promise.allSettled(runningPromises);
+    return this.controlStatus();
+  }
+
+  async resumeAll() {
+    if (this.closed) throw new Error("任务管理器已关闭");
+    if (!this.paused) return this.controlStatus();
+    for (const task of this.tasks.values()) {
+      if (task.status !== TASK_STATUS.PAUSED) continue;
+      task.status = TASK_STATUS.QUEUED;
+      task.error = null;
+      task.author = null;
+      task.resultPath = null;
+      task.progress = { stage: "等待继续", current: 0, total: 0, imagesDownloaded: 0 };
+      task.updatedAt = this.now().toISOString();
+      task.startedAt = null;
+      task.completedAt = null;
+      if (!this.queue.includes(task.id)) this.queue.push(task.id);
+      await this.store.save(task);
+    }
+    await this.controlStore.save({ paused: false, updatedAt: this.now().toISOString() });
+    this.paused = false;
+    this.#requestSchedule();
+    return this.controlStatus();
   }
 
   async cancel(id) {
@@ -158,7 +227,7 @@ export class TaskManager {
   }
 
   #schedule() {
-    if (this.closed) return;
+    if (this.closed || this.paused) return;
     while (this.running.size < this.maxConcurrency && this.queue.length > 0) {
       const id = this.queue.shift();
       const task = this.tasks.get(id);
@@ -212,9 +281,10 @@ export class TaskManager {
       task.completedAt = this.now().toISOString();
     } catch (error) {
       if (controller.signal.aborted || error?.name === "AbortError") {
-        task.status = TASK_STATUS.CANCELLED;
+        const paused = this.pauseRequested.has(task.id);
+        task.status = paused ? TASK_STATUS.PAUSED : TASK_STATUS.CANCELLED;
         task.error = null;
-        task.progress.stage = "已取消";
+        task.progress.stage = paused ? "已暂停" : "已取消";
       } else if (error?.code === "HUMAN_ACTION_REQUIRED") {
         preserveHumanAction = true;
         task.status = TASK_STATUS.WAITING_USER;
@@ -227,6 +297,7 @@ export class TaskManager {
       }
     } finally {
       await browserSession?.close({ preserveHumanAction }).catch(() => {});
+      this.pauseRequested.delete(task.id);
       task.updatedAt = this.now().toISOString();
       this.running.delete(task.id);
       await this.store.save(task);

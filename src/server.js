@@ -13,6 +13,7 @@ import { downloadMedia } from "./export/media-downloader.js";
 import { startServer } from "./http/server.js";
 import { TaskManager } from "./tasks/task-manager.js";
 import { TaskStore } from "./tasks/task-store.js";
+import { SchedulerStateStore } from "./tasks/scheduler-state-store.js";
 
 function defaultDataDir() {
   return process.env.VERCEL === "1" ? path.join(tmpdir(), "xhs-ins") : path.resolve(".data");
@@ -21,6 +22,7 @@ function defaultDataDir() {
 export async function createRuntime({ dataDir = defaultDataDir() } = {}) {
   await mkdir(dataDir, { recursive: true });
   const store = new TaskStore(path.join(dataDir, "tasks"));
+  const controlStore = new SchedulerStateStore(path.join(dataDir, "scheduler.json"));
   const browserManager = new BrowserManager({ profilesDir: path.join(dataDir, "browser-profiles") });
   const collectorFactory = createCollectorFactory({
     browserManager,
@@ -28,6 +30,7 @@ export async function createRuntime({ dataDir = defaultDataDir() } = {}) {
   });
   const manager = new TaskManager({
     store,
+    controlStore,
     collectorFactory,
     taskSessionFactory: (task) => browserManager.createTaskSession(task.platform, task.id),
     exporter: async (task, notes, taskDir, { signal, onProgress, browserSession }) => {

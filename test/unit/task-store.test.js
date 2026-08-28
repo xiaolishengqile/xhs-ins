@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { TaskStore } from "../../src/tasks/task-store.js";
+import { SchedulerStateStore } from "../../src/tasks/scheduler-state-store.js";
 
 test("任务状态按任务目录原子保存并可重新加载", async (t) => {
   const rootDir = await mkdtemp(path.join(tmpdir(), "collector-store-"));
@@ -39,4 +40,16 @@ test("同一任务的并发状态保存会按调用顺序串行完成", async (t
   })));
 
   assert.equal((await store.loadAll())[0].revision, 39);
+});
+
+test("调度暂停状态可原子保存并重新读取", async (t) => {
+  const rootDir = await mkdtemp(path.join(tmpdir(), "collector-control-"));
+  t.after(() => rm(rootDir, { recursive: true, force: true }));
+  const store = new SchedulerStateStore(path.join(rootDir, "scheduler.json"));
+
+  assert.deepEqual(await store.load(), { paused: false, updatedAt: null });
+  await store.save({ paused: true, updatedAt: "2026-08-28T12:00:00.000Z" });
+
+  assert.deepEqual(await store.load(), { paused: true, updatedAt: "2026-08-28T12:00:00.000Z" });
+  assert.deepEqual((await readdir(rootDir)).filter((name) => name.endsWith(".tmp")), []);
 });
