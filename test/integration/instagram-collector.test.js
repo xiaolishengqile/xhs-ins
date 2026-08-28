@@ -122,6 +122,117 @@ test("滚动主页并只保留范围内公开帖子图片", async () => {
   assert.ok(progress.some((value) => value.stage === "读取帖子详情"));
 });
 
+test("帖子页面临时响应失败时退避重试后继续采集", async () => {
+  const html = await readFile(new URL("../fixtures/instagram/post.html", import.meta.url), "utf8");
+  const postUrl = "https://www.instagram.com/p/shortcode-1/";
+  const profilePage = new ProfilePage([postUrl]);
+  const detailPage = new DetailPage({
+    [postUrl]: { html, bodyText: "Public post", images: ["https://scontent.cdninstagram.com/photo-1.jpg"] },
+  });
+  const originalGoto = detailPage.goto.bind(detailPage);
+  let attempts = 0;
+  detailPage.goto = async (url) => {
+    attempts += 1;
+    if (attempts < 3) throw new Error(`page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE at ${url}`);
+    return originalGoto(url);
+  };
+  const pages = [profilePage, detailPage];
+  const collector = new InstagramCollector({
+    browserManager: { newPage: async () => pages.shift() },
+    navigationRetryDelays: [0, 0],
+  });
+  const progress = [];
+
+  const result = await collector.collect(task(), {
+    signal: new AbortController().signal,
+    onProgress: async (value) => progress.push(value),
+  });
+
+  assert.equal(attempts, 3);
+  assert.deepEqual(result.notes.map((note) => note.id), ["shortcode-1"]);
+  assert.ok(progress.some((value) => value.stage === "页面暂时不可用，正在重试"));
+});
+
+test("帖子持续被平台拒绝时保留已采集内容并请求平台冷却", async () => {
+  const firstHtml = await readFile(new URL("../fixtures/instagram/post.html", import.meta.url), "utf8");
+  const secondHtml = firstHtml.replaceAll("shortcode-1", "shortcode-2");
+  const firstUrl = "https://www.instagram.com/p/shortcode-1/";
+  const secondUrl = "https://www.instagram.com/p/shortcode-2/";
+  const profilePage = new ProfilePage([firstUrl, secondUrl]);
+  const detailPage = new DetailPage({
+    [firstUrl]: { html: firstHtml, bodyText: "Public post", images: ["https://scontent.cdninstagram.com/photo-1.jpg"] },
+    [secondUrl]: { html: secondHtml, bodyText: "Public post", images: ["https://scontent.cdninstagram.com/photo-2.jpg"] },
+  });
+  const originalGoto = detailPage.goto.bind(detailPage);
+  detailPage.goto = async (url) => {
+    if (url === secondUrl) throw new Error(`page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE at ${url}`);
+    return originalGoto(url);
+  };
+  const pages = [profilePage, detailPage];
+  const collector = new InstagramCollector({
+    browserManager: { newPage: async () => pages.shift() },
+    navigationRetryDelays: [0, 0],
+  });
+
+  await assert.rejects(
+    () => collector.collect(task(), { signal: new AbortController().signal, onProgress: async () => {} }),
+    (error) => {
+      assert.equal(error.code, "PLATFORM_TEMPORARILY_UNAVAILABLE");
+      assert.deepEqual(error.partialResult.notes.map((note) => note.id), ["shortcode-1"]);
+      return true;
+    },
+  );
+});
+
+test("单篇帖子已经失效时跳过该篇并继续后续内容", async () => {
+  const html = await readFile(new URL("../fixtures/instagram/post.html", import.meta.url), "utf8");
+  const missingUrl = "https://www.instagram.com/p/missing-post/";
+  const healthyUrl = "https://www.instagram.com/p/shortcode-1/";
+  const profilePage = new ProfilePage([missingUrl, healthyUrl]);
+  const detailPage = new DetailPage({
+    [missingUrl]: { html, bodyText: "Not found", images: [] },
+    [healthyUrl]: { html, bodyText: "Public post", images: ["https://scontent.cdninstagram.com/photo-1.jpg"] },
+  });
+  const originalGoto = detailPage.goto.bind(detailPage);
+  detailPage.goto = async (url) => {
+    await originalGoto(url);
+    if (url === missingUrl) return { status: () => 404, ok: () => false };
+    return { status: () => 200, ok: () => true };
+  };
+  const pages = [profilePage, detailPage];
+  const collector = new InstagramCollector({ browserManager: { newPage: async () => pages.shift() } });
+
+  const result = await collector.collect(task(), {
+    signal: new AbortController().signal,
+    onProgress: async () => {},
+  });
+
+  assert.deepEqual(result.notes.map((note) => note.id), ["shortcode-1"]);
+  assert.equal(result.warnings.length, 1);
+  assert.match(result.warnings[0], /missing-post.*404/);
+});
+
+test("帖子返回未登录状态时不能静默跳过", async () => {
+  const html = await readFile(new URL("../fixtures/instagram/post.html", import.meta.url), "utf8");
+  const postUrl = "https://www.instagram.com/p/login-required/";
+  const profilePage = new ProfilePage([postUrl]);
+  const detailPage = new DetailPage({
+    [postUrl]: { html, bodyText: "Log in", images: [] },
+  });
+  const originalGoto = detailPage.goto.bind(detailPage);
+  detailPage.goto = async (url) => {
+    await originalGoto(url);
+    return { status: () => 401, ok: () => false };
+  };
+  const pages = [profilePage, detailPage];
+  const collector = new InstagramCollector({ browserManager: { newPage: async () => pages.shift() } });
+
+  await assert.rejects(
+    () => collector.collect(task(), { signal: new AbortController().signal, onProgress: async () => {} }),
+    LoginRequiredError,
+  );
+});
+
 test("延迟出现且包含博主名的帖子链接可以采集", async (t) => {
   const postHtml = await readFile(new URL("../fixtures/instagram/post.html", import.meta.url), "utf8");
   const browser = await chromium.launch({ headless: true });
@@ -264,6 +375,82 @@ test("轮播帖子会点击下一张并收集后续加载图片", async () => {
       "https://scontent.cdninstagram.com/photo-3.jpg",
     ],
   );
+});
+
+test("结构化图片候选不会导致长轮播提前停止", async () => {
+  const html = await readFile(new URL("../fixtures/instagram/post.html", import.meta.url), "utf8");
+  const postUrl = "https://www.instagram.com/p/shortcode-1/";
+  const image = (index) => ({
+    src: `https://scontent.cdninstagram.com/photo-${index}.jpg`,
+    currentSrc: `https://scontent.cdninstagram.com/photo-${index}.jpg`,
+    srcset: `https://scontent.cdninstagram.com/photo-${index}.jpg 1440w`,
+    naturalWidth: 1440,
+    naturalHeight: 1440,
+  });
+  const profilePage = new ProfilePage([postUrl]);
+  const detailPage = new DetailPage({
+    [postUrl]: [1, 2, 3, 4].map((index) => ({
+      html,
+      bodyText: "Public post",
+      images: [image(index)],
+    })),
+  });
+  const pages = [profilePage, detailPage];
+  const collector = new InstagramCollector({ browserManager: { newPage: async () => pages.shift() } });
+
+  const result = await collector.collect(task(), {
+    signal: new AbortController().signal,
+    onProgress: async () => {},
+  });
+
+  assert.deepEqual(
+    result.notes[0].media.map((item) => item.url),
+    [1, 2, 3, 4].map((index) => `https://scontent.cdninstagram.com/photo-${index}.jpg`),
+  );
+});
+
+test("同一图片存在多个展示尺寸时只保留最高分辨率地址", async () => {
+  const html = await readFile(new URL("../fixtures/instagram/post.html", import.meta.url), "utf8");
+  const postUrl = "https://www.instagram.com/p/shortcode-1/";
+  const small = "https://scontent.cdninstagram.com/media/full-photo.jpg?width=640";
+  const large = "https://scontent.cdninstagram.com/media/full-photo.jpg?width=1440";
+  const profilePage = new ProfilePage([postUrl]);
+  const detailPage = new DetailPage({
+    [postUrl]: [
+      {
+        html,
+        bodyText: "Public post",
+        images: [{
+          src: small,
+          currentSrc: small,
+          srcset: `${small} 640w, ${large} 1440w`,
+          naturalWidth: 640,
+          naturalHeight: 640,
+        }],
+      },
+      {
+        html,
+        bodyText: "Public post",
+        images: [{
+          src: large,
+          currentSrc: large,
+          srcset: `${large} 1440w`,
+          naturalWidth: 1440,
+          naturalHeight: 1440,
+        }],
+      },
+    ],
+  });
+  const pages = [profilePage, detailPage];
+  const collector = new InstagramCollector({ browserManager: { newPage: async () => pages.shift() } });
+
+  const result = await collector.collect(task(), {
+    signal: new AbortController().signal,
+    onProgress: async () => {},
+  });
+
+  assert.deepEqual(result.notes[0].media.map((item) => item.url), [large]);
+  assert.equal(result.notes[0].media[0].sourceWidth, 1440);
 });
 
 test("开始采集前取消不会创建浏览器页面", async () => {

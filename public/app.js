@@ -122,6 +122,10 @@ function renderTask(task) {
   track.append(bar);
   progress.append(progressLabel, track);
   card.append(progress);
+  const previewImages = task.progress?.previewImages ?? 0;
+  if (previewImages > 0) {
+    card.append(node("p", "task-warning", `${previewImages} 张图片仅获得平台预览尺寸`));
+  }
   if (task.error) card.append(node("p", "task-error", task.error));
 
   const actions = node("div", "task-actions");
@@ -165,8 +169,16 @@ function render(tasks, control = currentControl) {
   }
   const running = tasks.filter((task) => task.status === "running").length;
   document.querySelector('[data-testid="running-summary"]').textContent = `${running} / ${control.maxConcurrency ?? 5}`;
-  elements.schedulerStatus.textContent = control.paused ? "队列已暂停" : "正常调度";
-  elements.schedulerStatus.classList.toggle("is-paused", control.paused);
+  const coolingPlatforms = Object.keys(control.cooldowns ?? {});
+  const schedulerText = control.paused
+    ? "队列已暂停"
+    : coolingPlatforms.includes("instagram")
+      ? "照片墙平台冷却中"
+      : coolingPlatforms.length > 0
+        ? "部分平台冷却中"
+        : "正常调度";
+  elements.schedulerStatus.textContent = schedulerText;
+  elements.schedulerStatus.classList.toggle("is-paused", control.paused || coolingPlatforms.length > 0);
   elements.pauseAll.textContent = control.paused ? "继续全部" : "暂停全部";
   elements.pauseAll.disabled = controlBusy;
   elements.emptyState.hidden = tasks.length > 0;

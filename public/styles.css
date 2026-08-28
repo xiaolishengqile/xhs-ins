@@ -404,10 +404,16 @@ textarea:focus {
 }
 
 .task-range,
+.task-warning,
 .task-error {
   color: var(--muted);
   font-size: 13px;
   line-height: 1.55;
+}
+
+.task-warning {
+  margin: 12px 0 0;
+  color: var(--amber);
 }
 
 .task-error {

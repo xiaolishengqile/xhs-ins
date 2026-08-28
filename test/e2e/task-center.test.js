@@ -6,7 +6,7 @@ import path from "node:path";
 import { chromium } from "playwright";
 
 import { ApplicationController } from "../../src/application/controller.js";
-import { LoginRequiredError } from "../../src/collectors/errors.js";
+import { LoginRequiredError, PlatformTemporarilyUnavailableError } from "../../src/collectors/errors.js";
 import { createApp } from "../../src/http/app.js";
 import { startServer } from "../../src/http/server.js";
 import { TaskManager } from "../../src/tasks/task-manager.js";
@@ -14,13 +14,17 @@ import { TaskStore } from "../../src/tasks/task-store.js";
 import { createLinkDocxBuffer } from "../helpers/docx.js";
 import { eventually } from "../helpers/eventually.js";
 
-async function fixture(t, collect = async (task) => ({ author: task.profileKey, notes: [] })) {
+async function fixture(
+  t,
+  collect = async (task) => ({ author: task.profileKey, notes: [] }),
+  options = {},
+) {
   const rootDir = await mkdtemp(path.join(tmpdir(), "collector-e2e-"));
   const events = [];
   const manager = new TaskManager({
     store: new TaskStore(rootDir),
     collectorFactory: () => ({ collect }),
-    exporter: async (task) => path.join(rootDir, "output", task.profileKey),
+    exporter: options.exporter ?? (async (task) => path.join(rootDir, "output", task.profileKey)),
     now: () => new Date(2026, 7, 28, 12),
   });
   await manager.init();
@@ -203,4 +207,47 @@ test("没有运行任务时不会持续轮询任务列表", async (t) => {
   await page.waitForTimeout(1_200);
 
   assert.equal(listRequests, 1);
+});
+
+test("任务卡片会提示跳过帖子和低分辨率预览图", async (t) => {
+  const { manager, page, url } = await fixture(
+    t,
+    async (task) => ({ author: task.profileKey, notes: [{ id: "n1" }], warnings: ["帖子不可访问"] }),
+    {
+      exporter: async (task, _notes, _taskDir, { onProgress }) => {
+        await onProgress({ imagesDownloaded: 1, previewImages: 2 });
+        return path.join("output", task.profileKey);
+      },
+    },
+  );
+  const created = await manager.create({
+    url: "https://www.instagram.com/quality_notice/",
+    range: { preset: "week" },
+  });
+  await manager.start(created.id);
+  await eventually(() => assert.equal(manager.get(created.id).status, "completed"));
+
+  await page.goto(url);
+
+  await page.getByText("采集完成，跳过 1 篇不可访问帖子").waitFor();
+  await page.getByText("2 张图片仅获得平台预览尺寸").waitFor();
+});
+
+test("平台触发冷却时页面明确显示队列状态", async (t) => {
+  const { manager, page, url } = await fixture(t, async (task) => {
+    throw new PlatformTemporarilyUnavailableError("平台访问过于频繁", {
+      retryAfterMs: 60_000,
+      partialResult: { author: task.profileKey, notes: [], warnings: [] },
+    });
+  });
+  const created = await manager.create({
+    url: "https://www.instagram.com/cooldown_notice/",
+    range: { preset: "week" },
+  });
+  await manager.start(created.id);
+  await eventually(() => assert.equal(manager.get(created.id).progress.stage, "平台冷却中，稍后自动继续"));
+
+  await page.goto(url);
+
+  await page.getByText("照片墙平台冷却中").waitFor();
 });

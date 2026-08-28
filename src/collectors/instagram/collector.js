@@ -1,5 +1,11 @@
-import { LoginRequiredError, VerificationRequiredError } from "../errors.js";
+import {
+  LoginRequiredError,
+  PlatformTemporarilyUnavailableError,
+  VerificationRequiredError,
+} from "../errors.js";
+import { navigateWithRetry } from "../navigation.js";
 import { parseInstagramPostHtml } from "./parser.js";
+import { selectLargestImageCandidates } from "./image-candidates.js";
 
 function throwIfAborted(signal) {
   if (signal.aborted) throw new DOMException("已取消", "AbortError");
@@ -29,10 +35,26 @@ function isInRange(value, from, to) {
 }
 
 function mergeVisibleImages(note, images, hasVideo) {
-  const metadataImages = hasVideo ? [] : note.media.map((item) => item.url);
-  const urls = [...new Set([...metadataImages, ...images])];
-  note.media = urls.map((url) => ({ url, type: "image", localPath: null, error: null }));
+  const visible = selectLargestImageCandidates(images);
+  const selected = visible.length > 0
+    ? visible
+    : hasVideo
+      ? []
+      : note.media.map((item) => ({ url: item.url, width: 0, height: null }));
+  note.media = selected.map((item) => ({
+    url: item.url,
+    type: "image",
+    localPath: null,
+    error: null,
+    sourceWidth: item.width || null,
+    sourceHeight: item.height,
+  }));
   return note;
+}
+
+function imageSnapshotKey(image) {
+  if (typeof image === "string") return image;
+  return [image?.src, image?.currentSrc, image?.srcset, image?.naturalWidth, image?.naturalHeight].join("\u0000");
 }
 
 async function readProfileSnapshot(page, signal) {
@@ -51,7 +73,7 @@ async function readProfileSnapshot(page, signal) {
 }
 
 async function readPostDetail(page, signal) {
-  const images = new Set();
+  const images = new Map();
   let html = "";
   let bodyText = "";
   let previousSnapshot = "";
@@ -65,16 +87,22 @@ async function readPostDetail(page, signal) {
       bodyText: document.body?.innerText ?? "",
       images: [...document.querySelectorAll("article img")]
         .filter((image) => image.naturalWidth >= 200 || image.width >= 200)
-        .map((image) => image.currentSrc || image.src),
+        .map((image) => ({
+          src: image.src,
+          currentSrc: image.currentSrc,
+          srcset: image.srcset,
+          naturalWidth: image.naturalWidth,
+          naturalHeight: image.naturalHeight,
+        })),
       hasVideo: Boolean(document.querySelector("article video")),
     }));
     html ||= snapshot.html;
     bodyText = snapshot.bodyText;
     checkPageText(bodyText, true);
     hasVideo ||= Boolean(snapshot.hasVideo);
-    for (const url of snapshot.images ?? []) images.add(url);
+    for (const image of snapshot.images ?? []) images.set(imageSnapshotKey(image), image);
 
-    const signature = (snapshot.images ?? []).join("|");
+    const signature = (snapshot.images ?? []).map(imageSnapshotKey).join("|");
     unchangedRounds = signature === previousSnapshot ? unchangedRounds + 1 : 0;
     previousSnapshot = signature;
 
@@ -86,25 +114,38 @@ async function readPostDetail(page, signal) {
     await page.waitForTimeout(400);
   }
 
-  return { html, bodyText, images: [...images], hasVideo };
+  return { html, bodyText, images: [...images.values()], hasVideo };
 }
 
 export class InstagramCollector {
-  constructor({ browserManager }) {
+  constructor({
+    browserManager,
+    navigationRetryDelays = [5_000, 20_000],
+    platformCooldownMs = 5 * 60_000,
+  }) {
     this.browserManager = browserManager;
+    this.navigationRetryDelays = navigationRetryDelays;
+    this.platformCooldownMs = platformCooldownMs;
   }
 
   async collect(task, { signal, onProgress }) {
     throwIfAborted(signal);
     const profilePage = await this.browserManager.newPage("instagram");
     let detailPage;
+    const notes = [];
+    const warnings = [];
+    let author = task.profileKey;
+    let processed = 0;
+    const navigate = (page, url) => navigateWithRetry(page, url, {
+      signal,
+      retryDelays: this.navigationRetryDelays,
+      onRetry: () => onProgress({ stage: "页面暂时不可用，正在重试" }),
+    });
     try {
       detailPage = await this.browserManager.newPage("instagram");
-      await profilePage.goto(task.profileUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
+      await navigate(profilePage, task.profileUrl);
       await profilePage.waitForTimeout(800);
       const seen = new Set();
-      const notes = [];
-      let author = task.profileKey;
       let unchangedRounds = 0;
       let consecutiveOld = 0;
       let stop = false;
@@ -121,7 +162,17 @@ export class InstagramCollector {
 
         for (const url of fresh) {
           throwIfAborted(signal);
-          await detailPage.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
+          try {
+            await navigate(detailPage, url);
+          } catch (error) {
+            if (error?.code !== "PAGE_UNAVAILABLE") throw error;
+            if (error.status === 401) throw new LoginRequiredError();
+            if (![404, 410].includes(error.status)) throw error;
+            warnings.push(error.message);
+            processed += 1;
+            await onProgress({ stage: "跳过不可访问帖子", current: processed, total: seen.size });
+            continue;
+          }
           await detailPage.waitForTimeout(600);
           const detail = await readPostDetail(detailPage, signal);
           const note = mergeVisibleImages(
@@ -136,7 +187,8 @@ export class InstagramCollector {
           } else if (note.publishedAt && new Date(note.publishedAt) < new Date(task.from)) {
             consecutiveOld += 1;
           }
-          await onProgress({ stage: "读取帖子详情", current: seen.size, total: 0 });
+          processed += 1;
+          await onProgress({ stage: "读取帖子详情", current: processed, total: seen.size });
           if (consecutiveOld >= 6) {
             stop = true;
             break;
@@ -148,8 +200,15 @@ export class InstagramCollector {
           await profilePage.waitForTimeout(800);
         }
       }
-      return { author, notes };
+      return { author, notes, warnings };
     } catch (error) {
+      if (error?.code === "TRANSIENT_NAVIGATION_FAILURE") {
+        throw new PlatformTemporarilyUnavailableError("平台访问过于频繁，任务将在冷却后自动继续", {
+          retryAfterMs: this.platformCooldownMs,
+          partialResult: { author, notes, warnings },
+          cause: error,
+        });
+      }
       throw error;
     }
   }

@@ -17,3 +17,32 @@ export class VerificationRequiredError extends HumanActionRequiredError {
     super(message);
   }
 }
+
+export class PageUnavailableError extends Error {
+  constructor(url, status) {
+    super(`帖子不可访问：${url}（状态码 ${status}）`);
+    this.name = "PageUnavailableError";
+    this.code = "PAGE_UNAVAILABLE";
+    this.url = url;
+    this.status = status;
+  }
+}
+
+export class TransientNavigationError extends Error {
+  constructor(url, options = {}) {
+    super(`平台暂时拒绝页面访问：${url}`, options);
+    this.name = "TransientNavigationError";
+    this.code = "TRANSIENT_NAVIGATION_FAILURE";
+    this.url = url;
+  }
+}
+
+export class PlatformTemporarilyUnavailableError extends Error {
+  constructor(message, { retryAfterMs, partialResult, cause } = {}) {
+    super(message, { cause });
+    this.name = "PlatformTemporarilyUnavailableError";
+    this.code = "PLATFORM_TEMPORARILY_UNAVAILABLE";
+    this.retryAfterMs = retryAfterMs;
+    this.partialResult = partialResult;
+  }
+}

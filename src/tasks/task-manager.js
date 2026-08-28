@@ -4,13 +4,20 @@ import { normalizeProfileUrl } from "../domain/platform.js";
 import { resolveDateRange } from "../domain/date-range.js";
 import { RESTARTABLE_STATUS, TASK_STATUS } from "./task-states.js";
 import { normalizeBatchEntries } from "./batch-input.js";
+import { PlatformCooldowns } from "./platform-cooldowns.js";
 
 function clone(value) {
   return structuredClone(value);
 }
 
 function errorMessage(error) {
-  return error instanceof Error ? error.message : String(error);
+  const message = error instanceof Error ? error.message : String(error);
+  if (/page\.goto|net::ERR_/i.test(message)) return "页面访问失败，请稍后重试";
+  return message.replace(/\u001b\[[0-9;]*m/g, "").split("\n")[0];
+}
+
+function throwIfAborted(signal) {
+  if (signal.aborted) throw new DOMException("已取消", "AbortError");
 }
 
 export class TaskManager {
@@ -24,6 +31,8 @@ export class TaskManager {
       save: async () => {},
     },
     maxConcurrency = 5,
+    platformConcurrency = { instagram: 1 },
+    maxPlatformRecoveryAttempts = 2,
     now = () => new Date(),
     idFactory = randomUUID,
   }) {
@@ -33,6 +42,8 @@ export class TaskManager {
     this.taskSessionFactory = taskSessionFactory;
     this.controlStore = controlStore;
     this.maxConcurrency = maxConcurrency;
+    this.platformConcurrency = { ...platformConcurrency };
+    this.maxPlatformRecoveryAttempts = maxPlatformRecoveryAttempts;
     this.now = now;
     this.idFactory = idFactory;
     this.tasks = new Map();
@@ -45,10 +56,16 @@ export class TaskManager {
     this.blockedPlatforms = new Set();
     this.paused = false;
     this.closed = false;
+    this.platformCooldowns = new PlatformCooldowns({
+      store: this.controlStore,
+      now: this.now,
+      isPaused: () => this.paused,
+      onReady: () => this.#requestSchedule(),
+    });
   }
 
   async init() {
-    this.paused = (await this.controlStore.load()).paused === true;
+    this.paused = await this.platformCooldowns.init();
     for (const task of await this.store.loadAll()) {
       const previousStatus = task.status;
       if (task.status === TASK_STATUS.RUNNING) {
@@ -81,7 +98,7 @@ export class TaskManager {
       from: range.from,
       to: range.to,
       status: TASK_STATUS.PENDING,
-      progress: { stage: "待开始", current: 0, total: 0, imagesDownloaded: 0 },
+      progress: { stage: "待开始", current: 0, total: 0, imagesDownloaded: 0, previewImages: 0 },
       author: null,
       error: null,
       resultPath: null,
@@ -89,6 +106,8 @@ export class TaskManager {
       updatedAt: timestamp,
       startedAt: null,
       completedAt: null,
+      recoveryAttempts: 0,
+      warningCount: 0,
     };
     this.tasks.set(task.id, task);
     await this.store.save(task);
@@ -171,6 +190,7 @@ export class TaskManager {
       pausedTasks: tasks.filter((task) => task.status === TASK_STATUS.PAUSED).length,
       pending: tasks.filter((task) => task.status === TASK_STATUS.PENDING).length,
       blockedPlatforms: [...this.blockedPlatforms],
+      cooldowns: this.platformCooldowns.values(),
     };
   }
 
@@ -179,7 +199,7 @@ export class TaskManager {
     if (!this.paused) {
       this.paused = true;
       try {
-        await this.controlStore.save({ paused: true, updatedAt: this.now().toISOString() });
+        await this.platformCooldowns.save(true);
       } catch (error) {
         this.paused = false;
         this.#requestSchedule();
@@ -216,14 +236,14 @@ export class TaskManager {
       task.error = null;
       task.author = null;
       task.resultPath = null;
-      task.progress = { stage: "等待继续", current: 0, total: 0, imagesDownloaded: 0 };
+      task.progress = { stage: "等待继续", current: 0, total: 0, imagesDownloaded: 0, previewImages: 0 };
       task.updatedAt = this.now().toISOString();
       task.startedAt = null;
       task.completedAt = null;
       if (!this.queue.includes(task.id)) this.queue.push(task.id);
       await this.store.save(task);
     }
-    await this.controlStore.save({ paused: false, updatedAt: this.now().toISOString() });
+    await this.platformCooldowns.save(false);
     this.paused = false;
     this.#requestSchedule();
     return this.controlStatus();
@@ -249,6 +269,7 @@ export class TaskManager {
     if (![TASK_STATUS.FAILED, TASK_STATUS.CANCELLED].includes(task.status)) {
       throw new Error("只有失败或已取消任务可以重试");
     }
+    task.recoveryAttempts = 0;
     return this.#requeue(task, "等待重试");
   }
 
@@ -287,6 +308,7 @@ export class TaskManager {
 
   async shutdown() {
     this.closed = true;
+    this.platformCooldowns.close();
     for (const controller of this.running.values()) controller.abort();
     await Promise.allSettled([...this.runningPromises]);
   }
@@ -301,7 +323,8 @@ export class TaskManager {
     task.status = TASK_STATUS.QUEUED;
     task.error = null;
     task.resultPath = null;
-    task.progress = { stage, current: 0, total: 0, imagesDownloaded: 0 };
+    task.progress = { stage, current: 0, total: 0, imagesDownloaded: 0, previewImages: 0 };
+    task.warningCount = 0;
     task.updatedAt = this.now().toISOString();
     this.queue.push(task.id);
     await this.store.save(task);
@@ -315,12 +338,18 @@ export class TaskManager {
 
   #schedule() {
     if (this.closed || this.paused) return;
+    this.platformCooldowns.refresh();
     while (this.running.size < this.maxConcurrency && this.queue.length > 0) {
       const runnableIndex = this.queue.findIndex((id) => {
         const task = this.tasks.get(id);
-        return task?.status === TASK_STATUS.QUEUED && !this.blockedPlatforms.has(task.platform);
+        return task?.status === TASK_STATUS.QUEUED
+          && !this.blockedPlatforms.has(task.platform)
+          && !this.platformCooldowns.has(task.platform)
+          && this.#runningCount(task.platform) < (this.platformConcurrency[task.platform] ?? this.maxConcurrency);
       });
-      if (runnableIndex < 0) return;
+      if (runnableIndex < 0) {
+        return;
+      }
       const [id] = this.queue.splice(runnableIndex, 1);
       const task = this.tasks.get(id);
       if (!task || task.status !== TASK_STATUS.QUEUED) continue;
@@ -334,6 +363,14 @@ export class TaskManager {
     }
   }
 
+  #runningCount(platform) {
+    let count = 0;
+    for (const id of this.running.keys()) {
+      if (this.tasks.get(id)?.platform === platform) count += 1;
+    }
+    return count;
+  }
+
   async #run(task) {
     const controller = new AbortController();
     let browserSession = null;
@@ -344,17 +381,17 @@ export class TaskManager {
     task.updatedAt = this.now().toISOString();
     task.progress.stage = "正在采集";
     await this.store.save(task);
+    const onProgress = async (progress) => {
+      if (controller.signal.aborted) return;
+      task.progress = { ...task.progress, ...progress };
+      task.updatedAt = this.now().toISOString();
+      await this.store.save(task);
+    };
 
     try {
-      if (controller.signal.aborted) throw new DOMException("已取消", "AbortError");
+      throwIfAborted(controller.signal);
       browserSession = await this.taskSessionFactory(clone(task));
-      if (controller.signal.aborted) throw new DOMException("已取消", "AbortError");
-      const onProgress = async (progress) => {
-        if (controller.signal.aborted) return;
-        task.progress = { ...task.progress, ...progress };
-        task.updatedAt = this.now().toISOString();
-        await this.store.save(task);
-      };
+      throwIfAborted(controller.signal);
       const collector = this.collectorFactory(task.platform, browserSession ?? undefined);
       const result = await collector.collect(clone(task), {
         signal: controller.signal,
@@ -362,34 +399,64 @@ export class TaskManager {
       });
       if (controller.signal.aborted) return;
       task.author = result.author ?? task.profileKey;
+      task.warningCount = result.warnings?.length ?? 0;
       task.resultPath = await this.exporter(task, result.notes ?? [], this.store.taskDir(task.id), {
         signal: controller.signal,
         onProgress,
         browserSession,
       });
       task.status = TASK_STATUS.COMPLETED;
-      task.progress.stage = "采集完成";
+      task.progress.stage = task.warningCount > 0
+        ? `采集完成，跳过 ${task.warningCount} 篇不可访问帖子`
+        : "采集完成";
       task.completedAt = this.now().toISOString();
+      task.recoveryAttempts = 0;
     } catch (error) {
       if (controller.signal.aborted || error?.name === "AbortError") {
-        const paused = this.pauseRequested.has(task.id);
-        const waitingForHuman = this.humanActionRequested.has(task.id);
-        task.status = waitingForHuman
-          ? TASK_STATUS.WAITING_USER
-          : paused
-            ? TASK_STATUS.PAUSED
-            : TASK_STATUS.CANCELLED;
-        task.error = waitingForHuman ? "该平台需要先完成登录或验证" : null;
-        task.progress.stage = waitingForHuman
-          ? "等待平台登录或验证"
-          : paused
-            ? "已暂停"
-            : "已取消";
+        this.#markInterrupted(task);
       } else if (error?.code === "HUMAN_ACTION_REQUIRED") {
         task.status = TASK_STATUS.WAITING_USER;
         task.error = errorMessage(error);
         task.progress.stage = "等待人工登录或验证";
         await this.#blockPlatform(task.platform, task.id);
+      } else if (error?.code === "PLATFORM_TEMPORARILY_UNAVAILABLE") {
+        try {
+          throwIfAborted(controller.signal);
+          const partial = error.partialResult;
+          task.warningCount = Math.max(task.warningCount ?? 0, partial?.warnings?.length ?? 0);
+          if ((partial?.notes?.length ?? 0) > 0) {
+            task.author = partial.author ?? task.profileKey;
+            task.resultPath = await this.exporter(task, partial.notes, this.store.taskDir(task.id), {
+              signal: controller.signal,
+              onProgress,
+              browserSession,
+            });
+            throwIfAborted(controller.signal);
+          }
+          task.recoveryAttempts = (task.recoveryAttempts ?? 0) + 1;
+          if (task.recoveryAttempts > this.maxPlatformRecoveryAttempts) {
+            task.status = TASK_STATUS.FAILED;
+            task.error = "平台持续拒绝访问，请稍后手动重试";
+            task.progress.stage = "平台持续拒绝访问";
+          } else {
+            const retryAfterMs = Number.isFinite(error.retryAfterMs) ? Math.max(0, error.retryAfterMs) : 5 * 60_000;
+            await this.platformCooldowns.set(task.platform, retryAfterMs);
+            throwIfAborted(controller.signal);
+            task.status = TASK_STATUS.QUEUED;
+            task.error = "平台访问过于频繁，已自动降低速度";
+            task.progress.stage = "平台冷却中，稍后自动继续";
+            task.updatedAt = this.now().toISOString();
+            if (!this.queue.includes(task.id)) this.queue.push(task.id);
+          }
+        } catch (recoveryError) {
+          if (controller.signal.aborted || recoveryError?.name === "AbortError") {
+            this.#markInterrupted(task);
+          } else {
+            task.status = TASK_STATUS.FAILED;
+            task.error = errorMessage(recoveryError);
+            task.progress.stage = "保存部分结果失败";
+          }
+        }
       } else {
         task.status = TASK_STATUS.FAILED;
         task.error = errorMessage(error);
@@ -404,6 +471,22 @@ export class TaskManager {
       await this.store.save(task);
       this.#requestSchedule();
     }
+  }
+
+  #markInterrupted(task) {
+    const paused = this.pauseRequested.has(task.id);
+    const waitingForHuman = this.humanActionRequested.has(task.id);
+    task.status = waitingForHuman
+      ? TASK_STATUS.WAITING_USER
+      : paused
+        ? TASK_STATUS.PAUSED
+        : TASK_STATUS.CANCELLED;
+    task.error = waitingForHuman ? "该平台需要先完成登录或验证" : null;
+    task.progress.stage = waitingForHuman
+      ? "等待平台登录或验证"
+      : paused
+        ? "已暂停"
+        : "已取消";
   }
 
   async #blockPlatform(platform, sourceId) {

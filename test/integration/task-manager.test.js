@@ -8,11 +8,18 @@ import { eventually } from "../helpers/eventually.js";
 import { TaskManager } from "../../src/tasks/task-manager.js";
 import { TaskStore } from "../../src/tasks/task-store.js";
 import { SchedulerStateStore } from "../../src/tasks/scheduler-state-store.js";
-import { LoginRequiredError } from "../../src/collectors/errors.js";
+import { LoginRequiredError, PlatformTemporarilyUnavailableError } from "../../src/collectors/errors.js";
 
 function input(index) {
   return {
     url: `https://www.xiaohongshu.com/user/profile/user${index}`,
+    range: { preset: "week" },
+  };
+}
+
+function instagramInput(index) {
+  return {
+    url: `https://www.instagram.com/creator${index}/`,
     range: { preset: "week" },
   };
 }
@@ -119,6 +126,34 @@ test("六个任务中最多五个并行且空位出现后第六个自动开始",
   await eventually(() => assert.equal(manager.list().filter((task) => task.status === "completed").length, 6));
 });
 
+test("照片墙平台一次只运行一个任务且不阻塞其他平台", async (t) => {
+  const releases = new Map();
+  const started = [];
+  const manager = await managerFixture(t, async (task, { signal }) => {
+    started.push(task.profileKey);
+    await new Promise((resolve, reject) => {
+      releases.set(task.id, resolve);
+      signal.addEventListener("abort", () => reject(new DOMException("已取消", "AbortError")), { once: true });
+    });
+    return { author: task.profileKey, notes: [] };
+  });
+  const firstInstagram = await manager.create(instagramInput(1));
+  const secondInstagram = await manager.create(instagramInput(2));
+  const xiaohongshu = await manager.create(input(3));
+
+  await manager.startBatch([firstInstagram.id, secondInstagram.id, xiaohongshu.id]);
+
+  await eventually(() => assert.deepEqual(started.sort(), ["creator1", "user3"].sort()));
+  assert.equal(manager.get(secondInstagram.id).status, "queued");
+
+  releases.get(firstInstagram.id)();
+  await eventually(() => assert.ok(started.includes("creator2")));
+
+  releases.get(secondInstagram.id)();
+  releases.get(xiaohongshu.id)();
+  await eventually(() => assert.ok(manager.list().every((task) => task.status === "completed")));
+});
+
 test("运行任务可取消且不会影响其他任务", async (t) => {
   const manager = await managerFixture(t, async (task, { signal }) => {
     if (task.profileKey === "user0") {
@@ -183,6 +218,228 @@ test("失败任务可以重试且其他任务照常完成", async (t) => {
 
   await eventually(() => assert.equal(manager.get(failed.id).status, "completed"));
   assert.equal(manager.get(failed.id).error, null);
+});
+
+test("底层页面跳转错误会转换成简洁中文提示", async (t) => {
+  const manager = await managerFixture(t, async () => {
+    throw new Error("page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE\n\u001b[2mCall log\u001b[22m");
+  });
+  const created = await createAndStart(manager, input(0));
+
+  await eventually(() => assert.equal(manager.get(created.id).status, "failed"));
+
+  assert.equal(manager.get(created.id).error, "页面访问失败，请稍后重试");
+});
+
+test("平台临时拒绝访问时保存部分结果并冷却同平台队列", async (t) => {
+  const runs = [];
+  const exportedNoteIds = [];
+  const attempts = new Map();
+  const manager = await managerFixture(
+    t,
+    async (task) => {
+      runs.push(task.profileKey);
+      const attempt = (attempts.get(task.id) ?? 0) + 1;
+      attempts.set(task.id, attempt);
+      if (task.profileKey === "creator1" && attempt === 1) {
+        throw new PlatformTemporarilyUnavailableError("平台访问过于频繁", {
+          retryAfterMs: 80,
+          partialResult: {
+            author: task.profileKey,
+            notes: [{ id: "saved-before-cooldown" }],
+            warnings: ["帖子已失效"],
+          },
+        });
+      }
+      return {
+        author: task.profileKey,
+        notes: [],
+        warnings: task.profileKey === "creator1" ? ["帖子已失效"] : [],
+      };
+    },
+    {
+      now: () => new Date(),
+      exporter: async (_task, notes, taskDir) => {
+        exportedNoteIds.push(...notes.map((note) => note.id));
+        return path.join(taskDir, "result");
+      },
+    },
+  );
+  const first = await manager.create(instagramInput(1));
+  const second = await manager.create(instagramInput(2));
+  await manager.startBatch([first.id, second.id]);
+
+  await eventually(() => assert.equal(manager.get(first.id).progress.stage, "平台冷却中，稍后自动继续"));
+  assert.deepEqual(runs, ["creator1"]);
+  assert.deepEqual(exportedNoteIds, ["saved-before-cooldown"]);
+  assert.ok(manager.controlStatus().cooldowns.instagram);
+
+  await eventually(() => assert.ok(manager.list().every((task) => task.status === "completed")));
+  assert.equal(attempts.get(first.id), 2);
+  assert.equal(attempts.get(second.id), 1);
+  assert.equal(manager.get(first.id).warningCount, 1);
+});
+
+test("平台冷却前保存部分结果失败时任务会正常失败", async (t) => {
+  const manager = await managerFixture(
+    t,
+    async () => {
+      throw new PlatformTemporarilyUnavailableError("平台访问过于频繁", {
+        retryAfterMs: 80,
+        partialResult: { author: "creator1", notes: [{ id: "partial" }], warnings: [] },
+      });
+    },
+    {
+      now: () => new Date(),
+      exporter: async () => { throw new Error("部分结果保存失败"); },
+    },
+  );
+  const created = await createAndStart(manager, instagramInput(1));
+
+  await eventually(() => assert.equal(manager.get(created.id).status, "failed"));
+
+  assert.equal(manager.get(created.id).error, "部分结果保存失败");
+  assert.equal(manager.controlStatus().running, 0);
+  assert.deepEqual(manager.controlStatus().cooldowns, {});
+});
+
+test("平台冷却状态保存失败时不会留下无效冷却", async (t) => {
+  const manager = await managerFixture(
+    t,
+    async () => {
+      throw new PlatformTemporarilyUnavailableError("平台访问过于频繁", {
+        retryAfterMs: 80,
+        partialResult: { author: "creator1", notes: [], warnings: [] },
+      });
+    },
+    {
+      now: () => new Date(),
+      controlStore: {
+        load: async () => ({ paused: false, updatedAt: null }),
+        save: async () => { throw new Error("冷却状态保存失败"); },
+      },
+    },
+  );
+  const created = await createAndStart(manager, instagramInput(1));
+
+  await eventually(() => assert.equal(manager.get(created.id).status, "failed"));
+
+  assert.equal(manager.get(created.id).error, "冷却状态保存失败");
+  assert.deepEqual(manager.controlStatus().cooldowns, {});
+});
+
+test("保存冷却前部分结果时取消任务不会被覆盖成失败", async (t) => {
+  let exportStarted = false;
+  const manager = await managerFixture(
+    t,
+    async () => {
+      throw new PlatformTemporarilyUnavailableError("平台访问过于频繁", {
+        retryAfterMs: 80,
+        partialResult: { author: "creator1", notes: [{ id: "partial" }], warnings: [] },
+      });
+    },
+    {
+      now: () => new Date(),
+      exporter: async (_task, _notes, _taskDir, { signal }) => {
+        exportStarted = true;
+        await new Promise((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(new DOMException("已取消", "AbortError")), { once: true });
+        });
+      },
+    },
+  );
+  const created = await createAndStart(manager, instagramInput(1));
+  await eventually(() => assert.equal(exportStarted, true));
+
+  await manager.cancel(created.id);
+
+  assert.equal(manager.get(created.id).status, "cancelled");
+  assert.equal(manager.get(created.id).error, null);
+});
+
+test("保存冷却前部分结果时暂停任务不会被覆盖成失败", async (t) => {
+  let exportStarted = false;
+  const manager = await managerFixture(
+    t,
+    async () => {
+      throw new PlatformTemporarilyUnavailableError("平台访问过于频繁", {
+        retryAfterMs: 80,
+        partialResult: { author: "creator1", notes: [{ id: "partial" }], warnings: [] },
+      });
+    },
+    {
+      now: () => new Date(),
+      exporter: async (_task, _notes, _taskDir, { signal }) => {
+        exportStarted = true;
+        await new Promise((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(new DOMException("已取消", "AbortError")), { once: true });
+        });
+      },
+    },
+  );
+  const created = await createAndStart(manager, instagramInput(1));
+  await eventually(() => assert.equal(exportStarted, true));
+
+  await manager.pauseAll();
+
+  assert.equal(manager.get(created.id).status, "paused");
+  assert.equal(manager.get(created.id).error, null);
+});
+
+test("写入平台冷却状态期间取消任务不会重新入队", async (t) => {
+  let releaseSave;
+  let saveStarted = false;
+  const manager = await managerFixture(
+    t,
+    async () => {
+      throw new PlatformTemporarilyUnavailableError("平台访问过于频繁", {
+        retryAfterMs: 80,
+        partialResult: { author: "creator1", notes: [], warnings: [] },
+      });
+    },
+    {
+      now: () => new Date(),
+      controlStore: {
+        load: async () => ({ paused: false, updatedAt: null }),
+        save: async () => {
+          saveStarted = true;
+          await new Promise((resolve) => { releaseSave = resolve; });
+        },
+      },
+    },
+  );
+  const created = await createAndStart(manager, instagramInput(1));
+  await eventually(() => assert.equal(saveStarted, true));
+
+  const cancelling = manager.cancel(created.id);
+  await new Promise((resolve) => setImmediate(resolve));
+  releaseSave();
+  await cancelling;
+
+  assert.equal(manager.get(created.id).status, "cancelled");
+  assert.equal(manager.controlStatus().queued, 0);
+});
+
+test("平台多次冷却后仍被拒绝会停止自动重试", async (t) => {
+  let runs = 0;
+  const manager = await managerFixture(
+    t,
+    async () => {
+      runs += 1;
+      throw new PlatformTemporarilyUnavailableError("平台持续拒绝访问", {
+        retryAfterMs: 20,
+        partialResult: { author: "creator1", notes: [], warnings: [] },
+      });
+    },
+    { now: () => new Date(), maxPlatformRecoveryAttempts: 1 },
+  );
+  const created = await createAndStart(manager, instagramInput(1));
+
+  await eventually(() => assert.equal(manager.get(created.id).status, "failed"));
+
+  assert.equal(runs, 2);
+  assert.equal(manager.get(created.id).progress.stage, "平台持续拒绝访问");
+  assert.match(manager.get(created.id).error, /稍后手动重试/);
 });
 
 test("应用重启后会恢复未完成任务", async (t) => {
@@ -258,6 +515,27 @@ test("导出阶段可以更新图片下载进度", async (t) => {
 
   await eventually(() => assert.equal(manager.get(created.id).status, "completed"));
   assert.equal(manager.get(created.id).progress.imagesDownloaded, 2);
+});
+
+test("完成任务会展示跳过帖子与预览图数量", async (t) => {
+  const manager = await managerFixture(
+    t,
+    async () => ({ author: "测试博主", notes: [{ id: "n1" }], warnings: ["帖子一不可访问"] }),
+    {
+      exporter: async (_task, _notes, taskDir, { onProgress }) => {
+        await onProgress({ stage: "下载图片", imagesDownloaded: 1, previewImages: 2 });
+        return path.join(taskDir, "result");
+      },
+    },
+  );
+  const created = await createAndStart(manager, input(0));
+
+  await eventually(() => assert.equal(manager.get(created.id).status, "completed"));
+
+  const completed = manager.get(created.id);
+  assert.equal(completed.warningCount, 1);
+  assert.equal(completed.progress.previewImages, 2);
+  assert.equal(completed.progress.stage, "采集完成，跳过 1 篇不可访问帖子");
 });
 
 test("任务页面在媒体导出和归档完成后才关闭", async (t) => {
@@ -431,6 +709,57 @@ test("服务重启后保持暂停且运行中任务转为已暂停", async (t) =
   assert.equal(manager.controlStatus().paused, true);
   assert.equal(runs, 0);
   await manager.resumeAll();
+  await eventually(() => assert.equal(manager.get(savedTask.id).status, "completed"));
+  assert.equal(runs, 1);
+});
+
+test("服务重启后继续遵守尚未结束的平台冷却时间", async (t) => {
+  const rootDir = await mkdtemp(path.join(tmpdir(), "collector-cooldown-restart-"));
+  const taskStore = new TaskStore(path.join(rootDir, "tasks"));
+  const controlStore = new SchedulerStateStore(path.join(rootDir, "scheduler.json"));
+  const savedTask = {
+    id: "123e4567-e89b-12d3-a456-426614174001",
+    platform: "instagram",
+    profileUrl: "https://www.instagram.com/restart.cooldown/",
+    profileKey: "restart.cooldown",
+    from: "2026-08-22T00:00:00.000Z",
+    to: "2026-08-28T23:59:59.999Z",
+    status: "queued",
+    progress: { stage: "平台冷却中，稍后自动继续", current: 0, total: 0, imagesDownloaded: 0 },
+    author: null,
+    error: "平台访问过于频繁，已自动降低速度",
+    resultPath: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    startedAt: null,
+    completedAt: null,
+  };
+  await taskStore.save(savedTask);
+  await controlStore.save({
+    paused: false,
+    updatedAt: new Date().toISOString(),
+    cooldowns: { instagram: new Date(Date.now() + 120).toISOString() },
+  });
+  let runs = 0;
+  const manager = new TaskManager({
+    store: taskStore,
+    controlStore,
+    collectorFactory: () => ({ collect: async () => {
+      runs += 1;
+      return { author: "恢复任务", notes: [] };
+    } }),
+    exporter: async () => path.join(rootDir, "result"),
+  });
+  t.after(async () => {
+    await manager.shutdown();
+    await rm(rootDir, { recursive: true, force: true });
+  });
+
+  await manager.init();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  assert.equal(runs, 0);
+  assert.ok(manager.controlStatus().cooldowns.instagram);
   await eventually(() => assert.equal(manager.get(savedTask.id).status, "completed"));
   assert.equal(runs, 1);
 });
