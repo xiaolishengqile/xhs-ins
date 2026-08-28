@@ -2,6 +2,7 @@ import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { chromium } from "playwright";
 
+import { BrowserLaunchError } from "./errors.js";
 import { resolveSystemBrowserLaunchOptions } from "./system-browser.js";
 import { TaskBrowserSession } from "./task-browser-session.js";
 
@@ -39,6 +40,18 @@ function validateMediaUrl(platform, value) {
     throw new Error("图片地址不属于目标平台的公开图片域名");
   }
   return url.href;
+}
+
+function launchCandidate(options) {
+  if (options.channel) return options.channel;
+  if (options.executablePath) return path.win32.basename(path.basename(options.executablePath));
+  return "system";
+}
+
+function launchFailure(error) {
+  return (error instanceof Error ? error.message : String(error))
+    .replace(/\u001b\[[0-9;]*m/g, "")
+    .split("\n")[0];
 }
 
 export class BrowserManager {
@@ -181,13 +194,15 @@ export class BrowserManager {
     };
     const browserLaunchOptions = await this.browserLaunchOptions();
     let launchError;
+    const attempts = [];
     for (const browserOptions of browserLaunchOptions) {
       try {
         return await this.launchPersistentContext(profileDir, { ...options, ...browserOptions });
       } catch (error) {
         launchError = error;
+        attempts.push({ browser: launchCandidate(browserOptions), error: launchFailure(error) });
       }
     }
-    throw new Error("无法启动系统默认浏览器，也无法启动备用的谷歌浏览器或微软浏览器", { cause: launchError });
+    throw new BrowserLaunchError(attempts, { cause: launchError });
   }
 }

@@ -205,6 +205,33 @@ test("默认系统浏览器启动失败时会切换另一款系统浏览器", as
   assert.deepEqual(launchedChannels, ["chrome", "msedge"]);
 });
 
+test("所有系统浏览器启动失败时返回可识别的候选诊断", async (t) => {
+  const profilesDir = await mkdtemp(path.join(tmpdir(), "collector-browser-"));
+  t.after(() => rm(profilesDir, { recursive: true, force: true }));
+  const manager = new BrowserManager({
+    profilesDir,
+    browserLaunchOptions: async () => [{ channel: "chrome" }, { channel: "msedge" }],
+    launchPersistentContext: async (_directory, options) => {
+      throw new Error(`启动 ${options.channel} 失败\nCall log`);
+    },
+  });
+  t.after(() => manager.close());
+  let captured;
+
+  await assert.rejects(
+    () => manager.newPage("instagram"),
+    (error) => {
+      captured = error;
+      return error.code === "BROWSER_LAUNCH_FAILED";
+    },
+  );
+
+  assert.deepEqual(captured.attempts, [
+    { browser: "chrome", error: "启动 chrome 失败" },
+    { browser: "msedge", error: "启动 msedge 失败" },
+  ]);
+});
+
 test("持久浏览器启动后会保留自动生成的首个空白页", async (t) => {
   const profilesDir = await mkdtemp(path.join(tmpdir(), "collector-browser-"));
   t.after(() => rm(profilesDir, { recursive: true, force: true }));
