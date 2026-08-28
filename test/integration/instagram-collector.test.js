@@ -1,0 +1,125 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+
+import { InstagramCollector } from "../../src/collectors/instagram/collector.js";
+import { LoginRequiredError } from "../../src/collectors/errors.js";
+
+class ProfilePage {
+  constructor(links, bodyText = "Public profile") {
+    this.links = links;
+    this.bodyText = bodyText;
+    this.closed = false;
+  }
+
+  async goto() {}
+
+  async evaluate(callback) {
+    if (String(callback).includes("scrollTo")) return undefined;
+    return { links: this.links, bodyText: this.bodyText };
+  }
+
+  async waitForTimeout() {}
+
+  async close() {
+    this.closed = true;
+  }
+}
+
+class DetailPage {
+  constructor(details) {
+    this.details = details;
+    this.currentUrl = "";
+    this.closed = false;
+  }
+
+  async goto(url) {
+    this.currentUrl = url;
+  }
+
+  async evaluate() {
+    return this.details[this.currentUrl];
+  }
+
+  async waitForTimeout() {}
+
+  async close() {
+    this.closed = true;
+  }
+}
+
+function task() {
+  return {
+    profileUrl: "https://www.instagram.com/test.creator/",
+    profileKey: "test.creator",
+    from: "2026-08-22T00:00:00.000Z",
+    to: "2026-08-28T23:59:59.999Z",
+  };
+}
+
+test("滚动主页并只保留范围内公开帖子图片", async () => {
+  const inRangeHtml = await readFile(new URL("../fixtures/instagram/post.html", import.meta.url), "utf8");
+  const oldHtml = inRangeHtml
+    .replaceAll("shortcode-1", "old-post")
+    .replaceAll("2026-08-27T08:00:00+08:00", "2025-12-01T08:00:00+08:00")
+    .replaceAll("August 27, 2026", "December 1, 2025");
+  const inRangeUrl = "https://www.instagram.com/p/shortcode-1/";
+  const oldUrl = "https://www.instagram.com/p/old-post/";
+  const profilePage = new ProfilePage([inRangeUrl, oldUrl]);
+  const detailPage = new DetailPage({
+    [inRangeUrl]: {
+      html: inRangeHtml,
+      bodyText: "Public post",
+      images: [
+        "https://scontent.cdninstagram.com/photo-1.jpg",
+        "https://scontent.cdninstagram.com/photo-2.jpg",
+      ],
+    },
+    [oldUrl]: { html: oldHtml, bodyText: "Public post", images: [] },
+  });
+  const pages = [profilePage, detailPage];
+  const collector = new InstagramCollector({ browserManager: { newPage: async () => pages.shift() } });
+  const progress = [];
+
+  const result = await collector.collect(task(), {
+    signal: new AbortController().signal,
+    onProgress: async (value) => progress.push(value),
+  });
+
+  assert.equal(result.author, "test.creator");
+  assert.deepEqual(result.notes.map((note) => note.id), ["shortcode-1"]);
+  assert.deepEqual(
+    result.notes[0].media.map((item) => item.url),
+    ["https://scontent.cdninstagram.com/photo-1.jpg", "https://scontent.cdninstagram.com/photo-2.jpg"],
+  );
+  assert.equal(profilePage.closed, true);
+  assert.equal(detailPage.closed, true);
+  assert.ok(progress.some((value) => value.stage === "读取帖子详情"));
+});
+
+test("公开主页被登录墙遮挡时等待人工登录", async () => {
+  const profilePage = new ProfilePage([], "Log in to see photos and videos");
+  const detailPage = new DetailPage({});
+  const pages = [profilePage, detailPage];
+  const collector = new InstagramCollector({ browserManager: { newPage: async () => pages.shift() } });
+
+  await assert.rejects(
+    () => collector.collect(task(), { signal: new AbortController().signal, onProgress: async () => {} }),
+    LoginRequiredError,
+  );
+});
+
+test("开始采集前取消不会创建浏览器页面", async () => {
+  let pageCount = 0;
+  const collector = new InstagramCollector({
+    browserManager: { newPage: async () => { pageCount += 1; } },
+  });
+  const controller = new AbortController();
+  controller.abort();
+
+  await assert.rejects(
+    () => collector.collect(task(), { signal: controller.signal, onProgress: async () => {} }),
+    { name: "AbortError" },
+  );
+  assert.equal(pageCount, 0);
+});
