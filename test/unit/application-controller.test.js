@@ -53,3 +53,32 @@ test("普通任务不能打开登录窗口", async () => {
 
   await assert.rejects(() => controller.openLogin("task-1"), /不需要人工登录/);
 });
+
+test("打开图片目录前会确保固定目录存在", async () => {
+  const events = [];
+  const controller = new ApplicationController({
+    manager: {},
+    browserManager: {},
+    outputDir: "/Pictures/博主图片采集",
+    ensureDir: async (directory) => events.push(`mkdir:${directory}`),
+    openPath: async (directory) => events.push(`open:${directory}`),
+  });
+
+  const result = await controller.openOutputDirectory();
+
+  assert.deepEqual(events, [
+    "mkdir:/Pictures/博主图片采集",
+    "open:/Pictures/博主图片采集",
+  ]);
+  assert.deepEqual(result, { directory: "/Pictures/博主图片采集" });
+});
+
+test("云环境明确拒绝启动本地采集", async () => {
+  const controller = new ApplicationController({
+    manager: { start: async () => { throw new Error("不应执行"); } },
+    browserManager: {},
+    isCloud: true,
+  });
+
+  await assert.rejects(() => controller.start("task-1"), /请在本机运行/);
+});

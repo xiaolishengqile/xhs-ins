@@ -1,10 +1,8 @@
-import { createReadStream } from "node:fs";
-import { readFile, stat } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { readBuffer, readJson } from "./body.js";
-import { createCompletedArchive } from "../export/completed-archive.js";
 import { extractLinkEntriesFromFile } from "../import/link-file.js";
 
 const DEFAULT_PUBLIC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../public");
@@ -85,17 +83,8 @@ async function handleRequest(request, response, { manager, controller, publicDir
   if (request.method === "POST" && pathname === "/api/control/resume") {
     return sendJson(response, 200, await controller.resumeAll());
   }
-  if (request.method === "GET" && pathname === "/api/tasks/download-completed") {
-    const archive = await createCompletedArchive(manager.list());
-    response.writeHead(200, {
-      "content-type": "application/zip",
-      "content-disposition": 'attachment; filename="completed-tasks.zip"',
-      "cache-control": "no-store",
-      "x-content-type-options": "nosniff",
-    });
-    archive.outputStream.once("error", (error) => response.destroy(error));
-    archive.outputStream.pipe(response);
-    return;
+  if (request.method === "POST" && pathname === "/api/output/open") {
+    return sendJson(response, 200, await controller.openOutputDirectory());
   }
   if (request.method === "POST" && pathname === "/api/tasks") {
     const task = await manager.create(await readJson(request));
@@ -107,10 +96,10 @@ async function handleRequest(request, response, { manager, controller, publicDir
   }
   if (request.method === "POST" && pathname === "/api/tasks/start-batch") {
     const { ids } = await readJson(request);
-    return sendJson(response, 200, await manager.startBatch(ids));
+    return sendJson(response, 200, await controller.startBatch(ids));
   }
 
-  const taskMatch = pathname.match(/^\/api\/tasks\/([0-9a-f-]+)(?:\/(start|cancel|retry|login|resume|download))?$/i);
+  const taskMatch = pathname.match(/^\/api\/tasks\/([0-9a-f-]+)(?:\/(start|cancel|retry|login|resume))?$/i);
   if (taskMatch) {
     const [, id, action] = taskMatch;
     const task = manager.get(id);
@@ -127,27 +116,8 @@ async function handleRequest(request, response, { manager, controller, publicDir
       return sendJson(response, 200, { task: await controller.completeLogin(id) });
     }
     if (["start", "cancel", "retry"].includes(action) && request.method === "POST") {
-      const updated = await manager[action](id);
+      const updated = action === "start" ? await controller.start(id) : await manager[action](id);
       return sendJson(response, 200, { task: updated });
-    }
-    if (action === "download" && request.method === "GET") {
-      if (task.status !== "completed" || !task.resultPath) {
-        return sendJson(response, 409, { error: "任务尚未生成可下载结果" });
-      }
-      try {
-        const details = await stat(task.resultPath);
-        response.writeHead(200, {
-          "content-type": "application/zip",
-          "content-length": details.size,
-          "content-disposition": `attachment; filename="result-${task.id}.zip"`,
-          "x-content-type-options": "nosniff",
-        });
-        createReadStream(task.resultPath).pipe(response);
-      } catch (error) {
-        if (error.code !== "ENOENT") throw error;
-        sendJson(response, 404, { error: "结果文件不存在，请重试任务" });
-      }
-      return;
     }
   }
 

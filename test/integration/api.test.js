@@ -9,7 +9,6 @@ import { startServer } from "../../src/http/server.js";
 import { TaskManager } from "../../src/tasks/task-manager.js";
 import { TaskStore } from "../../src/tasks/task-store.js";
 import { eventually } from "../helpers/eventually.js";
-import { readZipEntries } from "../helpers/zip.js";
 import { createLinkDocxBuffer } from "../helpers/docx.js";
 import { ApplicationController } from "../../src/application/controller.js";
 import { LoginRequiredError } from "../../src/collectors/errors.js";
@@ -32,7 +31,7 @@ async function fixture(t, collect = async (task) => ({ author: task.profileKey, 
     openLogin: async () => {},
     closeLogin: async () => {},
   };
-  const controller = new ApplicationController({ manager, browserManager });
+  const controller = new ApplicationController({ manager, browserManager, ...options.controllerOptions });
   const instance = await startServer({ handler: createApp({ manager, controller }), port: 0 });
   t.after(async () => {
     await instance.close();
@@ -132,7 +131,7 @@ test("接口拒绝无效链接、无效数据和不存在任务", async (t) => {
   assert.equal((await fetch(`${url}/api/unknown`)).status, 404);
 });
 
-test("任务完成后可以下载结果", async (t) => {
+test("任务完成后不再提供压缩包下载接口", async (t) => {
   const { url, manager } = await fixture(t);
   const created = await (
     await fetch(`${url}/api/tasks`, {
@@ -147,11 +146,7 @@ test("任务完成后可以下载结果", async (t) => {
   await fetch(`${url}/api/tasks/${created.task.id}/start`, { method: "POST" });
   await eventually(() => assert.equal(manager.get(created.task.id).status, "completed"));
 
-  const response = await fetch(`${url}/api/tasks/${created.task.id}/download`);
-
-  assert.equal(response.status, 200);
-  assert.match(response.headers.get("content-disposition"), /attachment/);
-  assert.equal(await response.text(), `archive:${created.task.id}`);
+  assert.equal((await fetch(`${url}/api/tasks/${created.task.id}/download`)).status, 404);
 });
 
 test("取消和重试只影响指定任务", async (t) => {
@@ -330,32 +325,21 @@ test("登录接口只在用户点击后打开窗口并在完成后恢复平台�
   await eventually(() => assert.equal(manager.get(created.task.id).status, "completed"));
 });
 
-test("汇总下载包含点击时所有可用的完成任务", async (t) => {
-  const { url, manager } = await fixture(t);
-  const empty = await json(await fetch(`${url}/api/tasks/download-completed`));
-  assert.equal(empty.response.status, 409);
-  assert.match(empty.body.error, /没有可下载/);
-
-  const first = await manager.create({
-    url: "https://www.instagram.com/all_one/",
-    range: { preset: "week" },
+test("打开图片文件夹接口只打开固定输出目录", async (t) => {
+  const events = [];
+  const outputDir = path.join(tmpdir(), "固定图片目录");
+  const { url } = await fixture(t, undefined, {
+    controllerOptions: {
+      outputDir,
+      ensureDir: async (directory) => events.push(`mkdir:${directory}`),
+      openPath: async (directory) => events.push(`open:${directory}`),
+    },
   });
-  const second = await manager.create({
-    url: "https://www.xiaohongshu.com/user/profile/all-two",
-    range: { preset: "week" },
-  });
-  await manager.startBatch([first.id, second.id]);
-  await eventually(() => assert.ok(manager.list().every((task) => task.status === "completed")));
 
-  const response = await fetch(`${url}/api/tasks/download-completed`);
-  assert.equal(response.status, 200);
-  assert.equal(response.headers.get("content-type"), "application/zip");
-  assert.match(response.headers.get("content-disposition"), /attachment/);
-  const archivePath = path.join(manager.store.rootDir, "completed.zip");
-  await writeFile(archivePath, Buffer.from(await response.arrayBuffer()));
-  const entries = await readZipEntries(archivePath);
-  assert.equal([...entries.keys()].filter((name) => name.endsWith(".zip")).length, 2);
-  const manifest = entries.get("manifest.json").toString("utf8");
-  assert.match(manifest, new RegExp(first.id));
-  assert.match(manifest, new RegExp(second.id));
+  const result = await json(await fetch(`${url}/api/output/open`, { method: "POST" }));
+
+  assert.equal(result.response.status, 200);
+  assert.equal(result.body.directory, outputDir);
+  assert.deepEqual(events, [`mkdir:${outputDir}`, `open:${outputDir}`]);
+  assert.equal((await fetch(`${url}/api/tasks/download-completed`)).status, 404);
 });

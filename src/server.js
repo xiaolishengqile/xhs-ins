@@ -1,5 +1,5 @@
-import { mkdir, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -8,8 +8,7 @@ import { BrowserManager } from "./browser/browser-manager.js";
 import { createCollectorFactory } from "./collectors/collector-factory.js";
 import { InstagramCollector } from "./collectors/instagram/collector.js";
 import { XiaohongshuCollector } from "./collectors/xiaohongshu/collector.js";
-import { createTaskArchive } from "./export/archive.js";
-import { downloadMedia } from "./export/media-downloader.js";
+import { LocalImageStore } from "./export/local-image-store.js";
 import { startServer } from "./http/server.js";
 import { TaskManager } from "./tasks/task-manager.js";
 import { TaskStore } from "./tasks/task-store.js";
@@ -20,7 +19,11 @@ function defaultDataDir() {
   return process.env.VERCEL === "1" ? path.join(tmpdir(), "xhs-ins") : path.resolve(".data");
 }
 
-export async function createRuntime({ dataDir = defaultDataDir() } = {}) {
+function defaultOutputDir() {
+  return path.join(homedir(), "Pictures", "博主图片采集");
+}
+
+export async function createRuntime({ dataDir = defaultDataDir(), outputDir = defaultOutputDir() } = {}) {
   await mkdir(dataDir, { recursive: true });
   const store = new TaskStore(path.join(dataDir, "tasks"));
   const controlStore = new SchedulerStateStore(path.join(dataDir, "scheduler.json"));
@@ -29,25 +32,26 @@ export async function createRuntime({ dataDir = defaultDataDir() } = {}) {
     browserManager,
     collectors: { xiaohongshu: XiaohongshuCollector, instagram: InstagramCollector },
   });
+  const imageStore = new LocalImageStore({
+    rootDir: outputDir,
+    indexDir: path.join(dataDir, "output-index"),
+  });
   const manager = new TaskManager({
     store,
     controlStore,
     collectorFactory,
     taskSessionFactory: (task) => browserManager.createTaskSession(task.platform, task.id),
-    exporter: async (task, notes, taskDir, { signal, onProgress, browserSession }) => {
-      const downloaded = await downloadMedia(
-        notes,
-        taskDir,
-        (url) => browserSession.fetchBuffer(url),
-        (progress) => onProgress({ ...progress, stage: "下载图片" }),
+    exporter: async (task, notes, _taskDir, { signal, onProgress, browserSession }) => {
+      const saved = await imageStore.save(task, notes, {
+        fetchBuffer: (url) => browserSession.fetchBuffer(url),
+        onProgress: (progress) => onProgress({ ...progress, stage: "下载图片" }),
         signal,
-      );
-      await writeFile(path.join(taskDir, "notes.json"), `${JSON.stringify(downloaded, null, 2)}\n`, "utf8");
-      return createTaskArchive(task, downloaded, taskDir);
+      });
+      return saved.directory;
     },
   });
   await manager.init();
-  const controller = new ApplicationController({ manager, browserManager });
+  const controller = new ApplicationController({ manager, browserManager, outputDir });
   return {
     manager,
     browserManager,
