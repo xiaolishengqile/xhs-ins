@@ -54,6 +54,34 @@ test("普通任务不能打开登录窗口", async () => {
   await assert.rejects(() => controller.openLogin("task-1"), /不需要人工登录/);
 });
 
+test("恢复浏览器故障时先关闭旧上下文再恢复平台", async () => {
+  const events = [];
+  const task = { id: "task-1", platform: "instagram", status: "blocked", blockReason: "browser" };
+  const controller = new ApplicationController({
+    manager: {
+      get: () => task,
+      recoverPlatform: async (platform) => events.push(`recover:${platform}`),
+    },
+    browserManager: { closePlatform: async (platform) => events.push(`close:${platform}`) },
+  });
+
+  const recovered = await controller.recoverBrowser(task.id);
+
+  assert.deepEqual(events, ["close:instagram", "recover:instagram"]);
+  assert.equal(recovered, task);
+});
+
+test("登录阻塞任务不能调用浏览器故障恢复", async () => {
+  const controller = new ApplicationController({
+    manager: {
+      get: () => ({ id: "task-1", platform: "instagram", status: "waiting_user", blockReason: "login" }),
+    },
+    browserManager: {},
+  });
+
+  await assert.rejects(() => controller.recoverBrowser("task-1"), /没有浏览器运行环境故障/);
+});
+
 test("打开图片目录前会确保固定目录存在", async () => {
   const events = [];
   const controller = new ApplicationController({

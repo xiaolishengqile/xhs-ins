@@ -12,6 +12,7 @@ import { eventually } from "../helpers/eventually.js";
 import { createLinkDocxBuffer } from "../helpers/docx.js";
 import { ApplicationController } from "../../src/application/controller.js";
 import { LoginRequiredError } from "../../src/collectors/errors.js";
+import { BrowserLaunchError } from "../../src/browser/errors.js";
 
 async function fixture(t, collect = async (task) => ({ author: task.profileKey, notes: [] }), options = {}) {
   const rootDir = await mkdtemp(path.join(tmpdir(), "collector-api-"));
@@ -282,6 +283,7 @@ test("控制接口可以幂等暂停和继续调度器", async (t) => {
     pausedTasks: 0,
     pending: 0,
     blockedPlatforms: [],
+    platformBlocks: [],
     cooldowns: {},
   });
 
@@ -335,6 +337,45 @@ test("登录接口只在用户点击后打开窗口并在完成后恢复平台�
   const resumed = await fetch(`${url}/api/tasks/${created.task.id}/resume`, { method: "POST" });
   assert.equal(resumed.status, 200);
   assert.deepEqual(events, ["open:instagram", "close:instagram"]);
+  await eventually(() => assert.equal(manager.get(created.task.id).status, "completed"));
+});
+
+test("浏览器故障恢复接口会重新检测并恢复同平台任务", async (t) => {
+  let browserUnavailable = true;
+  let browserCloses = 0;
+  const { url, manager } = await fixture(
+    t,
+    async (task) => {
+      if (browserUnavailable) throw new BrowserLaunchError([{ browser: "chrome", error: "系统终止浏览器" }]);
+      return { author: task.profileKey, notes: [] };
+    },
+    {
+      browserManager: {
+        close: async () => { browserCloses += 1; },
+        closePlatform: async () => { browserCloses += 1; },
+        openLogin: async () => {},
+        closeLogin: async () => {},
+      },
+    },
+  );
+  const created = await (
+    await fetch(`${url}/api/tasks`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        url: "https://www.instagram.com/browser_blocked/",
+        range: { preset: "week" },
+      }),
+    })
+  ).json();
+  await fetch(`${url}/api/tasks/${created.task.id}/start`, { method: "POST" });
+  await eventually(() => assert.equal(manager.get(created.task.id).status, "blocked"));
+  browserUnavailable = false;
+
+  const recovered = await fetch(`${url}/api/tasks/${created.task.id}/recover`, { method: "POST" });
+
+  assert.equal(recovered.status, 200);
+  assert.equal(browserCloses, 1);
   await eventually(() => assert.equal(manager.get(created.task.id).status, "completed"));
 });
 

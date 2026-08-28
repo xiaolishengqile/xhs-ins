@@ -57,6 +57,14 @@ export class ApplicationController {
     return this.manager.get(taskId);
   }
 
+  async recoverBrowser(taskId) {
+    this.#assertLocal();
+    const task = this.#browserBlockedTask(taskId);
+    await this.browserManager.closePlatform(task.platform);
+    await this.manager.recoverPlatform(task.platform);
+    return this.manager.get(taskId);
+  }
+
   async openOutputDirectory() {
     this.#assertLocal();
     await this.ensureDir(this.outputDir);
@@ -72,6 +80,15 @@ export class ApplicationController {
     const task = this.manager.get(taskId);
     if (!task) throw new Error("任务不存在");
     if (task.status !== "waiting_user") throw new Error("该任务不需要人工登录");
+    return task;
+  }
+
+  #browserBlockedTask(taskId) {
+    const task = this.manager.get(taskId);
+    if (!task) throw new Error("任务不存在");
+    if (task.status !== "blocked" || task.blockReason !== "browser") {
+      throw new Error("该任务没有浏览器运行环境故障");
+    }
     return task;
   }
 }

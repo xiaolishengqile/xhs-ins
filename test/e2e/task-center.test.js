@@ -7,6 +7,7 @@ import { chromium } from "playwright";
 
 import { ApplicationController } from "../../src/application/controller.js";
 import { LoginRequiredError, PlatformTemporarilyUnavailableError } from "../../src/collectors/errors.js";
+import { BrowserLaunchError } from "../../src/browser/errors.js";
 import { createApp } from "../../src/http/app.js";
 import { startServer } from "../../src/http/server.js";
 import { TaskManager } from "../../src/tasks/task-manager.js";
@@ -30,6 +31,7 @@ async function fixture(
   await manager.init();
   const browserManager = {
     close: async () => events.push("close-browser"),
+    closePlatform: async (platform) => events.push(`close-platform:${platform}`),
     openLogin: async (platform) => events.push(`open-login:${platform}`),
     closeLogin: async (platform) => events.push(`close-login:${platform}`),
   };
@@ -250,4 +252,29 @@ test("平台触发冷却时页面明确显示队列状态", async (t) => {
   await page.goto(url);
 
   await page.getByText("照片墙平台冷却中").waitFor();
+});
+
+test("浏览器受阻任务只显示重新检测入口并可整体恢复", async (t) => {
+  let browserUnavailable = true;
+  const { manager, page, url } = await fixture(t, async (task) => {
+    if (browserUnavailable) throw new BrowserLaunchError([{ browser: "chrome", error: "系统终止浏览器" }]);
+    return { author: task.profileKey, notes: [] };
+  });
+  const created = await manager.create({
+    url: "https://www.instagram.com/browser_blocked_ui/",
+    range: { preset: "week" },
+  });
+  await manager.start(created.id);
+  await eventually(() => assert.equal(manager.get(created.id).status, "blocked"));
+
+  await page.goto(url);
+
+  await page.getByText("浏览器运行环境受阻", { exact: true }).first().waitFor();
+  await page.getByText("浏览器运行环境受阻", { exact: true }).nth(1).waitFor();
+  assert.equal(await page.getByRole("button", { name: "打开登录窗口" }).count(), 0);
+  assert.equal(await page.getByRole("button", { name: "我已处理，继续" }).count(), 0);
+  browserUnavailable = false;
+  await page.getByRole("button", { name: "重新检测并继续" }).click();
+
+  await page.locator('[data-status="completed"]').waitFor();
 });

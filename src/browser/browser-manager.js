@@ -122,6 +122,13 @@ export class BrowserManager {
     await login?.context.close().catch(() => {});
   }
 
+  async closePlatform(platform) {
+    await Promise.all([
+      this.closeLogin(platform),
+      this.#closeCollectionContext(platform),
+    ]);
+  }
+
   async close() {
     const contexts = await Promise.allSettled([...this.contexts.values()]);
     const loginContexts = await Promise.allSettled([...this.loginContexts.values()]);

@@ -28,6 +28,7 @@ const STATUS = {
   running: "运行中",
   paused: "已暂停",
   waiting_user: "等待人工处理",
+  blocked: "运行环境受阻",
   completed: "已完成",
   failed: "失败",
   cancelled: "已取消",
@@ -130,13 +131,16 @@ function renderTask(task) {
 
   const actions = node("div", "task-actions");
   if (task.status === "pending") actions.append(actionButton(task, "start", "开始"));
-  if (["queued", "running", "paused", "waiting_user"].includes(task.status)) {
+  if (["queued", "running", "paused", "waiting_user", "blocked"].includes(task.status)) {
     actions.append(actionButton(task, "cancel", "取消"));
   }
   if (["failed", "cancelled"].includes(task.status)) actions.append(actionButton(task, "retry", "重试"));
   if (task.status === "waiting_user") {
     actions.append(actionButton(task, "login", "打开登录窗口"));
     actions.append(actionButton(task, "resume", "我已处理，继续"));
+  }
+  if (task.status === "blocked" && task.blockReason === "browser") {
+    actions.append(actionButton(task, "recover", "重新检测并继续"));
   }
   const remove = actionButton(task, "delete", "删除");
   remove.classList.add("task-action-danger");
@@ -170,15 +174,18 @@ function render(tasks, control = currentControl) {
   const running = tasks.filter((task) => task.status === "running").length;
   document.querySelector('[data-testid="running-summary"]').textContent = `${running} / ${control.maxConcurrency ?? 5}`;
   const coolingPlatforms = Object.keys(control.cooldowns ?? {});
+  const browserBlocked = (control.platformBlocks ?? []).some((block) => block.reason === "browser");
   const schedulerText = control.paused
     ? "队列已暂停"
-    : coolingPlatforms.includes("instagram")
+    : browserBlocked
+      ? "浏览器运行环境受阻"
+      : coolingPlatforms.includes("instagram")
       ? "照片墙平台冷却中"
       : coolingPlatforms.length > 0
         ? "部分平台冷却中"
         : "正常调度";
   elements.schedulerStatus.textContent = schedulerText;
-  elements.schedulerStatus.classList.toggle("is-paused", control.paused || coolingPlatforms.length > 0);
+  elements.schedulerStatus.classList.toggle("is-paused", control.paused || browserBlocked || coolingPlatforms.length > 0);
   elements.pauseAll.textContent = control.paused ? "继续全部" : "暂停全部";
   elements.pauseAll.disabled = controlBusy;
   elements.emptyState.hidden = tasks.length > 0;
@@ -339,7 +346,11 @@ elements.taskList.addEventListener("click", async (event) => {
   try {
     if (action === "delete") await request(`/api/tasks/${id}`, { method: "DELETE" });
     else await request(`/api/tasks/${id}/${action}`, { method: "POST" });
-    elements.message.textContent = action === "login" ? "登录窗口已打开，处理完成后点击“我已处理，继续”。" : "操作已完成。";
+    elements.message.textContent = action === "login"
+      ? "登录窗口已打开，处理完成后点击“我已处理，继续”。"
+      : action === "recover"
+        ? "已重新检测浏览器并恢复该平台任务。"
+        : "操作已完成。";
     await refresh();
   } catch (error) {
     elements.message.textContent = error.message;

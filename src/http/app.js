@@ -103,7 +103,7 @@ async function handleRequest(request, response, { manager, controller, publicDir
     return sendJson(response, 200, await controller.startBatch(ids));
   }
 
-  const taskMatch = pathname.match(/^\/api\/tasks\/([0-9a-f-]+)(?:\/(start|cancel|retry|login|resume))?$/i);
+  const taskMatch = pathname.match(/^\/api\/tasks\/([0-9a-f-]+)(?:\/(start|cancel|retry|login|resume|recover))?$/i);
   if (taskMatch) {
     const [, id, action] = taskMatch;
     const task = manager.get(id);
@@ -118,6 +118,9 @@ async function handleRequest(request, response, { manager, controller, publicDir
     }
     if (action === "resume" && request.method === "POST") {
       return sendJson(response, 200, { task: await controller.completeLogin(id) });
+    }
+    if (action === "recover" && request.method === "POST") {
+      return sendJson(response, 200, { task: await controller.recoverBrowser(id) });
     }
     if (["start", "cancel", "retry"].includes(action) && request.method === "POST") {
       const updated = action === "start" ? await controller.start(id) : await manager[action](id);

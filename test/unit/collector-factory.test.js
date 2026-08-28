@@ -71,6 +71,40 @@ test("同一平台的多个页面复用一个持久浏览器会话", async (t) =
   assert.equal(second, pages[2]);
 });
 
+test("恢复单个平台只关闭该平台浏览器上下文", async (t) => {
+  const profilesDir = await mkdtemp(path.join(tmpdir(), "collector-browser-"));
+  t.after(() => rm(profilesDir, { recursive: true, force: true }));
+  const contexts = new Map();
+  const launches = new Map();
+  const manager = new BrowserManager({
+    profilesDir,
+    launchPersistentContext: async (directory) => {
+      const platform = path.basename(directory);
+      launches.set(platform, (launches.get(platform) ?? 0) + 1);
+      const context = {
+        closed: false,
+        newPage: async () => ({ close: async () => {} }),
+        request: { get: async () => ({ ok: () => true, body: async () => Buffer.from("image") }) },
+        close: async () => { context.closed = true; },
+      };
+      contexts.set(platform, context);
+      return context;
+    },
+  });
+  t.after(() => manager.close());
+  await manager.newPage("instagram");
+  await manager.newPage("xiaohongshu");
+  const xiaohongshuContext = contexts.get("xiaohongshu");
+
+  await manager.closePlatform("instagram");
+
+  assert.equal(contexts.get("instagram").closed, true);
+  assert.equal(xiaohongshuContext.closed, false);
+  await manager.newPage("instagram");
+  assert.equal(launches.get("instagram"), 2);
+  assert.equal(launches.get("xiaohongshu"), 1);
+});
+
 test("平台首个空白页只用于保持浏览器且任务使用新页面", async (t) => {
   const profilesDir = await mkdtemp(path.join(tmpdir(), "collector-browser-"));
   t.after(() => rm(profilesDir, { recursive: true, force: true }));
