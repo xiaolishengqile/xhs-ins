@@ -5,8 +5,34 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { BrowserManager } from "../../src/browser/browser-manager.js";
+import { resolveSystemBrowserLaunchOptions } from "../../src/browser/system-browser.js";
 import { createCollectorFactory } from "../../src/collectors/collector-factory.js";
 import { LoginRequiredError, VerificationRequiredError } from "../../src/collectors/errors.js";
+
+test("系统默认浏览器使用独立程序时会优先使用其安装路径", async () => {
+  const launchOptions = await resolveSystemBrowserLaunchOptions({
+    platform: "win32",
+    readDefaultBrowser: async () => ({
+      browserId: "SLBrowserHTML",
+      command: '"C:\\Program Files (x86)\\Lenovo\\SLBrowser\\SLBrowser.exe" --single-argument %1',
+    }),
+  });
+
+  assert.deepEqual(launchOptions, [
+    { executablePath: "C:\\Program Files (x86)\\Lenovo\\SLBrowser\\SLBrowser.exe" },
+    { channel: "chrome" },
+    { channel: "msedge" },
+  ]);
+});
+
+test("系统默认浏览器为微软浏览器时会优先使用对应通道", async () => {
+  const launchOptions = await resolveSystemBrowserLaunchOptions({
+    platform: "win32",
+    readDefaultBrowser: async () => ({ browserId: "MSEdgeHTM", command: "" }),
+  });
+
+  assert.deepEqual(launchOptions, [{ channel: "msedge" }, { channel: "chrome" }]);
+});
 
 test("同一平台的多个页面复用一个持久浏览器会话", async (t) => {
   const profilesDir = await mkdtemp(path.join(tmpdir(), "collector-browser-"));
@@ -64,7 +90,7 @@ test("人工处理页面会保持打开并可在恢复成功后统一关闭", as
   assert.equal(page.closed, true);
 });
 
-test("自动化浏览器缓存缺失时改用电脑已安装的浏览器", async (t) => {
+test("采集会直接使用系统默认浏览器路径而不启动测试浏览器", async (t) => {
   const profilesDir = await mkdtemp(path.join(tmpdir(), "collector-browser-"));
   t.after(() => rm(profilesDir, { recursive: true, force: true }));
   const launchOptions = [];
@@ -75,9 +101,9 @@ test("自动化浏览器缓存缺失时改用电脑已安装的浏览器", async
   };
   const manager = new BrowserManager({
     profilesDir,
+    browserLaunchOptions: async () => [{ executablePath: "C:\\SystemBrowser\\browser.exe" }],
     launchPersistentContext: async (_directory, options) => {
       launchOptions.push(options);
-      if (!options.channel) throw new Error("Executable doesn't exist at temporary cache");
       return context;
     },
   });
@@ -85,11 +111,37 @@ test("自动化浏览器缓存缺失时改用电脑已安装的浏览器", async
 
   await manager.newPage("xiaohongshu");
 
-  assert.equal(launchOptions.length, 2);
-  assert.equal(launchOptions[1].channel, "chrome");
+  assert.equal(launchOptions.length, 1);
+  assert.equal(launchOptions[0].executablePath, "C:\\SystemBrowser\\browser.exe");
+  assert.equal(launchOptions[0].channel, undefined);
 });
 
-test("持久浏览器启动后会关闭自动生成的空白页", async (t) => {
+test("默认系统浏览器启动失败时会切换另一款系统浏览器", async (t) => {
+  const profilesDir = await mkdtemp(path.join(tmpdir(), "collector-browser-"));
+  t.after(() => rm(profilesDir, { recursive: true, force: true }));
+  const launchedChannels = [];
+  const context = {
+    newPage: async () => ({ close: async () => {} }),
+    request: { get: async () => ({ ok: () => true, body: async () => Buffer.from("image") }) },
+    close: async () => {},
+  };
+  const manager = new BrowserManager({
+    profilesDir,
+    browserLaunchOptions: async () => [{ channel: "chrome" }, { channel: "msedge" }],
+    launchPersistentContext: async (_directory, options) => {
+      launchedChannels.push(options.channel);
+      if (options.channel === "chrome") throw new Error("spawn UNKNOWN");
+      return context;
+    },
+  });
+  t.after(() => manager.close());
+
+  await assert.doesNotReject(() => manager.newPage("instagram"));
+
+  assert.deepEqual(launchedChannels, ["chrome", "msedge"]);
+});
+
+test("持久浏览器启动后会复用自动生成的首个空白页", async (t) => {
   const profilesDir = await mkdtemp(path.join(tmpdir(), "collector-browser-"));
   t.after(() => rm(profilesDir, { recursive: true, force: true }));
   const initialPage = {
@@ -99,7 +151,7 @@ test("持久浏览器启动后会关闭自动生成的空白页", async (t) => {
   };
   const context = {
     pages: () => [initialPage],
-    newPage: async () => ({ close: async () => {} }),
+    newPage: async () => ({ url: () => "about:blank", close: async () => {} }),
     request: { get: async () => ({ ok: () => true, body: async () => Buffer.from("image") }) },
     close: async () => {},
   };
@@ -109,9 +161,10 @@ test("持久浏览器启动后会关闭自动生成的空白页", async (t) => {
   });
   t.after(() => manager.close());
 
-  await manager.newPage("xiaohongshu");
+  const page = await manager.newPage("xiaohongshu");
 
-  assert.equal(initialPage.closed, true);
+  assert.equal(page, initialPage);
+  assert.equal(initialPage.closed, false);
 });
 
 test("媒体下载只允许对应平台的公开图片域名", async (t) => {

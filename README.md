@@ -17,16 +17,16 @@
 
 - Node.js 22 或更高版本。
 - macOS、Windows 或 Linux 图形桌面环境。
+- Windows 的系统默认浏览器基于 Chromium，或已安装 Google Chrome、Microsoft Edge 作为备用浏览器。
 - 可正常访问目标平台的网络。
 
 ## 安装
 
 ```bash
 npm install
-npm run install:browser
 ```
 
-第二条命令会安装采集所需的浏览器，只需执行一次。
+Windows 采集时会优先打开系统默认浏览器；当前支持基于 Chromium 的默认浏览器，并在启动失败时依次尝试 Google Chrome 和 Microsoft Edge。其他系统会依次尝试 Google Chrome 和 Microsoft Edge。采集登录资料仍独立保存在项目数据目录中，不会直接修改日常浏览器资料。
 
 ## 启动
 

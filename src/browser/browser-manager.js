@@ -2,6 +2,8 @@ import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { chromium } from "playwright";
 
+import { resolveSystemBrowserLaunchOptions } from "./system-browser.js";
+
 const MEDIA_HOSTS = {
   xiaohongshu: ["xiaohongshu.com", ".xhscdn.com", ".xhscdn.net"],
   instagram: ["instagram.com", ".cdninstagram.com", ".fbcdn.net"],
@@ -38,17 +40,30 @@ export class BrowserManager {
   constructor({
     profilesDir,
     headless = process.env.COLLECTOR_HEADLESS === "1",
+    browserLaunchOptions = resolveSystemBrowserLaunchOptions,
     launchPersistentContext = (directory, options) => chromium.launchPersistentContext(directory, options),
   }) {
     this.profilesDir = path.resolve(profilesDir);
     this.headless = headless;
+    this.browserLaunchOptions = browserLaunchOptions;
     this.launchPersistentContext = launchPersistentContext;
     this.contexts = new Map();
     this.humanActionPages = new Map();
+    this.claimedPages = new WeakSet();
   }
 
   async newPage(platform) {
-    return (await this.#context(platform)).newPage();
+    const context = await this.#context(platform);
+    const reusablePage = (context.pages?.() ?? []).find(
+      (page) => page.url() === "about:blank" && !this.claimedPages.has(page),
+    );
+    if (reusablePage) {
+      this.claimedPages.add(reusablePage);
+      return reusablePage;
+    }
+    const page = await context.newPage();
+    this.claimedPages.add(page);
+    return page;
   }
 
   async fetchBuffer(platform, url) {
@@ -74,6 +89,7 @@ export class BrowserManager {
     const contexts = await Promise.allSettled([...this.contexts.values()]);
     this.contexts.clear();
     this.humanActionPages.clear();
+    this.claimedPages = new WeakSet();
     await Promise.allSettled(
       contexts.filter((item) => item.status === "fulfilled").map((item) => item.value.close()),
     );
@@ -98,15 +114,20 @@ export class BrowserManager {
       locale: "zh-CN",
       acceptDownloads: false,
     };
+    const browserLaunchOptions = await this.browserLaunchOptions();
     let context;
-    try {
-      context = await this.launchPersistentContext(profileDir, options);
-    } catch (error) {
-      if (!/Executable doesn't exist/i.test(error?.message)) throw error;
-      context = await this.launchPersistentContext(profileDir, { ...options, channel: "chrome" });
+    let launchError;
+    for (const browserOptions of browserLaunchOptions) {
+      try {
+        context = await this.launchPersistentContext(profileDir, { ...options, ...browserOptions });
+        break;
+      } catch (error) {
+        launchError = error;
+      }
     }
-    const blankPages = (context.pages?.() ?? []).filter((page) => page.url() === "about:blank");
-    await Promise.allSettled(blankPages.map((page) => page.close()));
+    if (!context) {
+      throw new Error("无法启动系统默认浏览器，也无法启动备用的谷歌浏览器或微软浏览器", { cause: launchError });
+    }
     return context;
   }
 }
