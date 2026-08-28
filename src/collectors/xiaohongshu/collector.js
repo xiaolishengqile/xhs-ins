@@ -11,8 +11,15 @@ async function bodyText(page) {
 
 async function initialState(page) {
   const serialized = await page.evaluate(() => {
+    const state = window.__INITIAL_STATE__ ?? null;
+    const unwrap = (value) => value?._rawValue ?? value?._value ?? value;
+    const profileNotes = unwrap(state?.user?.notes);
+    const noteDetails = unwrap(state?.note?.noteDetailMap);
+    const payload = profileNotes !== undefined || noteDetails !== undefined
+      ? { profileNotes, noteDetails }
+      : state;
     const seen = new WeakSet();
-    return JSON.stringify(window.__INITIAL_STATE__ ?? null, function omitCircularReference(_key, value) {
+    return JSON.stringify(payload, function omitCircularReference(_key, value) {
       if (typeof value !== "object" || value === null) return value;
       if (seen.has(value)) return undefined;
       seen.add(value);

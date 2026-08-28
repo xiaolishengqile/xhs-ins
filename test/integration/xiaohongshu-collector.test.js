@@ -128,7 +128,7 @@ test("开始采集前取消会立即终止", async () => {
   );
 });
 
-test("页面初始状态引用链过深且存在循环引用时仍可采集必要数据", async (t) => {
+test("登录后的响应式状态极深且存在循环引用时仍只读取业务数据", async (t) => {
   const profile = await fixture("profile-state.json");
   profile.data.notes = [profile.data.notes[0]];
   const detail = await fixture("note-detail.json");
@@ -136,11 +136,15 @@ test("页面初始状态引用链过深且存在循环引用时仍可采集必�
   t.after(() => browser.close());
   const page = await browser.newPage();
   await page.route("https://www.xiaohongshu.com/**", async (route) => {
-    const payload = new URL(route.request().url()).pathname.startsWith("/explore/") ? detail : profile;
+    const isDetail = new URL(route.request().url()).pathname.startsWith("/explore/");
+    const payload = isDetail ? detail : profile;
     const body = `<meta charset="utf-8"><body>公开主页</body><script>
-      const state = ${JSON.stringify(payload)};
+      const payload = ${JSON.stringify(payload)};
+      const state = ${isDetail
+        ? `{ note: { noteDetailMap: { "note-image-1": payload } } }`
+        : `{ user: { notes: { _rawValue: [payload.data.notes] } } }`};
       let current = state;
-      for (let index = 0; index < 500; index += 1) current = current.deep = {};
+      for (let index = 0; index < 20000; index += 1) current = current.deep = {};
       current.circular = state;
       window.__INITIAL_STATE__ = state;
     </script>`;
