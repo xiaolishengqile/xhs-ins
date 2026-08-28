@@ -7,6 +7,7 @@ import path from "node:path";
 import { eventually } from "../helpers/eventually.js";
 import { TaskManager } from "../../src/tasks/task-manager.js";
 import { TaskStore } from "../../src/tasks/task-store.js";
+import { LoginRequiredError } from "../../src/collectors/errors.js";
 
 function input(index) {
   return {
@@ -132,4 +133,16 @@ test("应用重启后会恢复未完成任务", async (t) => {
   await manager.init();
 
   await eventually(() => assert.equal(manager.list()[0].status, "completed"));
+});
+
+test("等待人工登录的任务会释放并发名额", async (t) => {
+  const manager = await managerFixture(t, async (task) => {
+    if (task.profileKey === "user0") throw new LoginRequiredError();
+    return { author: task.profileKey, notes: [] };
+  }, { maxConcurrency: 1 });
+  const waiting = await manager.create(input(0));
+  const next = await manager.create(input(1));
+
+  await eventually(() => assert.equal(manager.get(waiting.id).status, "waiting_user"));
+  await eventually(() => assert.equal(manager.get(next.id).status, "completed"));
 });
