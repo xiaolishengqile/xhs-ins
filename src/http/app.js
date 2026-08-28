@@ -63,6 +63,10 @@ async function handleRequest(request, response, { manager, publicDir }) {
     const task = await manager.create(await readJson(request));
     return sendJson(response, 202, { task });
   }
+  if (request.method === "POST" && pathname === "/api/tasks/batch") {
+    const result = await manager.createBatch(await readJson(request));
+    return sendJson(response, 202, { ...result, control: manager.controlStatus() });
+  }
 
   const taskMatch = pathname.match(/^\/api\/tasks\/([0-9a-f-]+)(?:\/(cancel|retry|resume|download))?$/i);
   if (taskMatch) {

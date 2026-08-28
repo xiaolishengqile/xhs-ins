@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { normalizeProfileUrl } from "../domain/platform.js";
 import { resolveDateRange } from "../domain/date-range.js";
 import { RESTARTABLE_STATUS, TASK_STATUS } from "./task-states.js";
+import { normalizeBatchEntries } from "./batch-input.js";
 
 function clone(value) {
   return structuredClone(value);
@@ -91,6 +92,29 @@ export class TaskManager {
     await this.store.save(task);
     this.#requestSchedule();
     return clone(task);
+  }
+
+  async createBatch({ entries, range }) {
+    if (this.closed) throw new Error("任务管理器已关闭");
+    resolveDateRange(range, this.now());
+    const normalized = normalizeBatchEntries(entries);
+    const tasks = [];
+    for (const entry of normalized.valid) {
+      try {
+        tasks.push(await this.create({ url: entry.url, range }));
+      } catch (error) {
+        normalized.rejected.push({
+          line: entry.line,
+          url: entry.url,
+          reason: errorMessage(error),
+        });
+      }
+    }
+    return {
+      tasks,
+      rejected: normalized.rejected,
+      duplicates: normalized.duplicates,
+    };
   }
 
   list() {

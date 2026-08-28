@@ -160,3 +160,30 @@ test("删除任务接口会移除任务及其结果文件", async (t) => {
   assert.equal(manager.get(created.task.id), null);
   assert.equal((await fetch(`${url}/api/tasks/${created.task.id}`)).status, 404);
 });
+
+test("批量创建会跳过无效和重复链接并返回任务摘要", async (t) => {
+  const { url, manager } = await fixture(t);
+
+  const result = await json(await fetch(`${url}/api/tasks/batch`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      entries: [
+        { line: 1, url: "https://www.instagram.com/batch_one/" },
+        { line: 2, url: "https://www.instagram.com/batch_one/?source=file" },
+        { line: 3, url: "broken" },
+        { line: 4, url: "https://www.xiaohongshu.com/user/profile/batch-two" },
+      ],
+      range: { preset: "week" },
+    }),
+  }));
+
+  assert.equal(result.response.status, 202);
+  assert.equal(result.body.tasks.length, 2);
+  assert.equal(result.body.duplicates, 1);
+  assert.deepEqual(result.body.rejected, [
+    { line: 3, url: "broken", reason: "请输入完整、安全的主页链接" },
+  ]);
+  assert.equal(result.body.control.maxConcurrency, 5);
+  assert.equal(manager.list().length, 2);
+});
