@@ -12,7 +12,7 @@
       <header class="hero">
         <p class="eyebrow">本地私有工具</p>
         <h1>公开博主图片采集</h1>
-        <p class="hero-copy">同时处理 5 位博主。当前任务运行时，可以继续提交下一条链接。</p>
+        <p class="hero-copy">同时处理 5 位博主。支持一次粘贴多条链接，每行一条。</p>
       </header>
 
       <main>
@@ -28,14 +28,14 @@
           <form id="task-form">
             <label class="field field-url">
               <span>博主主页链接</span>
-              <input
+              <textarea
                 id="profile-url"
                 name="url"
-                type="url"
                 required
                 autocomplete="off"
-                placeholder="粘贴小红书或 Instagram 博主主页链接"
-              />
+                rows="4"
+                placeholder="粘贴小红书或 Instagram 博主主页链接，每行一条，最多 5 条"
+              ></textarea>
             </label>
 
             <label class="field">
@@ -89,7 +89,7 @@
           </div>
           <div id="empty-state" class="empty-state">
             <span>还没有任务</span>
-            <p>在上方粘贴一个公开博主主页链接即可开始。</p>
+            <p>在上方粘贴公开博主主页链接即可开始，每行一条。</p>
           </div>
           <div id="task-list" class="task-list" aria-live="polite"></div>
         </section>

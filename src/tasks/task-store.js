@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -37,5 +37,9 @@ export class TaskStore {
       }
     }
     return tasks.sort((left, right) => left.createdAt?.localeCompare(right.createdAt ?? "") ?? 0);
+  }
+
+  async remove(id) {
+    await rm(this.taskDir(id), { recursive: true, force: true });
   }
 }

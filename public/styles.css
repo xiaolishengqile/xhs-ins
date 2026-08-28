@@ -28,7 +28,8 @@ body {
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 
@@ -133,20 +134,33 @@ h1 {
 }
 
 input,
-select {
+select,
+textarea {
   width: 100%;
-  height: 48px;
   border: 1px solid var(--line);
   border-radius: 12px;
   outline: none;
   background: #fffdf8;
   color: var(--ink);
-  padding: 0 14px;
   transition: border-color 160ms ease, box-shadow 160ms ease;
 }
 
+input,
+select {
+  height: 48px;
+  padding: 0 14px;
+}
+
+textarea {
+  min-height: 112px;
+  padding: 13px 14px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
 input:focus,
-select:focus {
+select:focus,
+textarea:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px rgba(235, 76, 55, 0.12);
 }
@@ -358,6 +372,10 @@ select:focus {
 
 .task-action:hover {
   background: rgba(32, 29, 26, 0.12);
+}
+
+.task-action-danger {
+  color: var(--accent-dark);
 }
 
 footer {

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { access, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -87,6 +87,33 @@ test("运行任务可取消且不会影响其他任务", async (t) => {
 
   await eventually(() => assert.equal(manager.get(first.id).status, "cancelled"));
   await eventually(() => assert.equal(manager.get(second.id).status, "completed"));
+});
+
+test("删除运行任务会先停止采集并彻底移除记录", async (t) => {
+  let started = false;
+  let aborted = false;
+  const manager = await managerFixture(
+    t,
+    (_task, { signal }) => {
+      started = true;
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => {
+          aborted = true;
+          reject(new DOMException("已取消", "AbortError"));
+        }, { once: true });
+      });
+    },
+  );
+  const created = await manager.create(input(0));
+  const taskDir = manager.store.taskDir(created.id);
+  await eventually(() => assert.equal(started, true));
+
+  await manager.delete(created.id);
+
+  assert.equal(aborted, true);
+  assert.equal(manager.get(created.id), null);
+  assert.deepEqual(await manager.store.loadAll(), []);
+  await assert.rejects(() => access(taskDir), { code: "ENOENT" });
 });
 
 test("失败任务可以重试且其他任务照常完成", async (t) => {

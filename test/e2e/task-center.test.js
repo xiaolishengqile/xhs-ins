@@ -94,3 +94,54 @@ test("没有活动任务时不会持续请求任务列表", async (t) => {
 
   assert.equal(listRequests, 1);
 });
+
+test("一次粘贴五条链接会创建五个并行任务并自动去重", async (t) => {
+  const { manager, page, url } = await fixture(
+    t,
+    (_task, { signal }) => new Promise((_resolve, reject) => {
+      signal.addEventListener("abort", () => reject(new DOMException("已取消", "AbortError")), { once: true });
+    }),
+  );
+  const links = Array.from(
+    { length: 5 },
+    (_value, index) => `https://www.xiaohongshu.com/user/profile/batch-user-${index}`,
+  );
+  await page.goto(url);
+  await page.getByLabel("博主主页链接").fill([...links, links[0]].join("\n"));
+
+  await page.getByRole("button", { name: "开始采集" }).click();
+
+  await page.waitForFunction(() => document.querySelectorAll('[data-status="running"]').length === 5);
+  assert.equal(manager.list().length, 5);
+  assert.deepEqual(new Set(manager.list().map((task) => task.profileUrl)), new Set(links));
+});
+
+test("一次输入超过五位不同博主时不会创建部分任务", async (t) => {
+  const { manager, page, url } = await fixture(t, async (task) => ({ author: task.profileKey, notes: [] }));
+  const links = Array.from(
+    { length: 6 },
+    (_value, index) => `https://www.xiaohongshu.com/user/profile/too-many-${index}`,
+  );
+  await page.goto(url);
+  await page.getByLabel("博主主页链接").fill(links.join("\n"));
+
+  await page.getByRole("button", { name: "开始采集" }).click();
+
+  await page.getByText("一次最多提交 5 条链接").waitFor();
+  assert.equal(manager.list().length, 0);
+});
+
+test("任务卡片可以确认后永久删除", async (t) => {
+  const { manager, page, url } = await fixture(t, async (task) => ({ author: task.profileKey, notes: [] }));
+  await page.goto(url);
+  await page.getByLabel("博主主页链接").fill("https://www.instagram.com/remove.creator/");
+  await page.getByRole("button", { name: "开始采集" }).click();
+  const completed = page.locator('[data-status="completed"]');
+  await completed.waitFor();
+  page.once("dialog", (dialog) => dialog.accept());
+
+  await completed.getByRole("button", { name: "删除" }).click();
+
+  await page.getByText("还没有任务").waitFor();
+  assert.equal(manager.list().length, 0);
+});

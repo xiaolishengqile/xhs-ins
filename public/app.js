@@ -87,6 +87,9 @@ function renderTask(task) {
     download.href = `/api/tasks/${task.id}/download`;
     actions.append(download);
   }
+  const remove = actionButton(task, "delete", "删除");
+  remove.classList.add("task-action-danger");
+  actions.append(remove);
   card.append(actions);
   return card;
 }
@@ -134,19 +137,32 @@ presetInput.addEventListener("change", () => {
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
   const button = form.querySelector('button[type="submit"]');
-  const submittedUrl = urlInput.value;
+  const submittedText = urlInput.value;
+  const urls = [...new Set(submittedText.split(/\r?\n/).map((value) => value.trim()).filter(Boolean))];
+  if (urls.length === 0) {
+    message.textContent = "请至少输入一条博主主页链接";
+    return;
+  }
+  if (urls.length > 5) {
+    message.textContent = "一次最多提交 5 条链接";
+    return;
+  }
   const range = { preset: presetInput.value };
   if (range.preset === "custom") Object.assign(range, { from: dateFrom.value, to: dateTo.value });
   button.disabled = true;
-  message.textContent = "正在创建任务…";
+  message.textContent = `正在创建 ${urls.length} 个任务…`;
   try {
-    await request("/api/tasks", {
+    const results = await Promise.allSettled(urls.map((url) => request("/api/tasks", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ url: submittedUrl, range }),
-    });
-    if (urlInput.value === submittedUrl) urlInput.value = "";
-    message.textContent = "任务已创建，可继续提交下一条链接。";
+      body: JSON.stringify({ url, range }),
+    })));
+    const failures = results.filter((result) => result.status === "rejected");
+    const createdCount = results.length - failures.length;
+    if (failures.length === 0 && urlInput.value === submittedText) urlInput.value = "";
+    message.textContent = failures.length === 0
+      ? `已创建 ${createdCount} 个任务，可继续提交。`
+      : `已创建 ${createdCount} 个任务，${failures.length} 个失败：${failures[0].reason.message}`;
     await refresh();
   } catch (error) {
     message.textContent = error.message;
@@ -158,9 +174,17 @@ form.addEventListener("submit", async (event) => {
 taskList.addEventListener("click", async (event) => {
   const button = event.target.closest("button[data-action]");
   if (!button) return;
+  if (
+    button.dataset.action === "delete" &&
+    !window.confirm("删除后将停止采集，并永久移除任务记录、图片和结果文件。确定删除吗？")
+  ) return;
   button.disabled = true;
   try {
-    await request(`/api/tasks/${button.dataset.id}/${button.dataset.action}`, { method: "POST" });
+    if (button.dataset.action === "delete") {
+      await request(`/api/tasks/${button.dataset.id}`, { method: "DELETE" });
+    } else {
+      await request(`/api/tasks/${button.dataset.id}/${button.dataset.action}`, { method: "POST" });
+    }
     await refresh();
   } catch (error) {
     message.textContent = error.message;

@@ -138,3 +138,25 @@ test("取消和重试只影响指定任务", async (t) => {
   release();
   await eventually(() => assert.equal(manager.get(created.task.id).status, "completed"));
 });
+
+test("删除任务接口会移除任务及其结果文件", async (t) => {
+  const { url, manager } = await fixture(t);
+  const created = await (
+    await fetch(`${url}/api/tasks`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        url: "https://www.xiaohongshu.com/user/profile/delete-user",
+        range: { preset: "week" },
+      }),
+    })
+  ).json();
+  await eventually(() => assert.equal(manager.get(created.task.id).status, "completed"));
+
+  const removed = await json(await fetch(`${url}/api/tasks/${created.task.id}`, { method: "DELETE" }));
+
+  assert.equal(removed.response.status, 200);
+  assert.deepEqual(removed.body, { deleted: true });
+  assert.equal(manager.get(created.task.id), null);
+  assert.equal((await fetch(`${url}/api/tasks/${created.task.id}`)).status, 404);
+});

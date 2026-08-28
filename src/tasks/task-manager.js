@@ -31,6 +31,7 @@ export class TaskManager {
     this.queue = [];
     this.running = new Map();
     this.runningPromises = new Set();
+    this.taskRuns = new Map();
     this.closed = false;
   }
 
@@ -115,6 +116,17 @@ export class TaskManager {
     return this.#requeue(task, "等待恢复");
   }
 
+  async delete(id) {
+    this.#requireTask(id);
+    this.queue = this.queue.filter((queuedId) => queuedId !== id);
+    this.running.get(id)?.abort();
+    const runningPromise = this.taskRuns.get(id);
+    if (runningPromise) await Promise.allSettled([runningPromise]);
+    this.tasks.delete(id);
+    await this.store.remove(id);
+    this.#requestSchedule();
+  }
+
   async shutdown() {
     this.closed = true;
     for (const controller of this.running.values()) controller.abort();
@@ -151,7 +163,11 @@ export class TaskManager {
       if (!task || task.status !== TASK_STATUS.QUEUED) continue;
       const promise = this.#run(task);
       this.runningPromises.add(promise);
-      promise.finally(() => this.runningPromises.delete(promise));
+      this.taskRuns.set(id, promise);
+      promise.finally(() => {
+        this.runningPromises.delete(promise);
+        if (this.taskRuns.get(id) === promise) this.taskRuns.delete(id);
+      });
     }
   }
 

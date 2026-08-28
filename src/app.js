@@ -70,6 +70,10 @@ async function handleRequest(request, response, { manager, publicDir }) {
     const task = manager.get(id);
     if (!task) return sendJson(response, 404, { error: "任务不存在" });
     if (!action && request.method === "GET") return sendJson(response, 200, { task });
+    if (!action && request.method === "DELETE") {
+      await manager.delete(id);
+      return sendJson(response, 200, { deleted: true });
+    }
     if (["cancel", "retry", "resume"].includes(action) && request.method === "POST") {
       const updated = await manager[action](id);
       return sendJson(response, 200, { task: updated });
