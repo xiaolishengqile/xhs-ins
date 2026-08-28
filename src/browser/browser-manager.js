@@ -98,11 +98,15 @@ export class BrowserManager {
       locale: "zh-CN",
       acceptDownloads: false,
     };
+    let context;
     try {
-      return await this.launchPersistentContext(profileDir, options);
+      context = await this.launchPersistentContext(profileDir, options);
     } catch (error) {
       if (!/Executable doesn't exist/i.test(error?.message)) throw error;
-      return this.launchPersistentContext(profileDir, { ...options, channel: "chrome" });
+      context = await this.launchPersistentContext(profileDir, { ...options, channel: "chrome" });
     }
+    const blankPages = (context.pages?.() ?? []).filter((page) => page.url() === "about:blank");
+    await Promise.allSettled(blankPages.map((page) => page.close()));
+    return context;
   }
 }

@@ -9,6 +9,19 @@ async function bodyText(page) {
   return page.evaluate(() => document.body?.innerText ?? "").catch(() => "");
 }
 
+async function initialState(page) {
+  const serialized = await page.evaluate(() => {
+    const seen = new WeakSet();
+    return JSON.stringify(window.__INITIAL_STATE__ ?? null, function omitCircularReference(_key, value) {
+      if (typeof value !== "object" || value === null) return value;
+      if (seen.has(value)) return undefined;
+      seen.add(value);
+      return value;
+    });
+  });
+  return JSON.parse(serialized);
+}
+
 async function checkHumanAction(page, requireLogin = false) {
   const text = await bodyText(page);
   if (/验证码|安全验证|滑块|captcha/i.test(text)) throw new VerificationRequiredError();
@@ -57,7 +70,7 @@ export class XiaohongshuCollector {
       while (unchangedRounds < 2) {
         await Promise.allSettled([...pendingResponses]);
         const payloads = responsePayloads.splice(0);
-        payloads.push(await page.evaluate(() => window.__INITIAL_STATE__ ?? null));
+        payloads.push(await initialState(page));
         const before = candidates.size;
         const addedThisRound = [];
         for (const payload of payloads) {
@@ -98,7 +111,7 @@ export class XiaohongshuCollector {
         throwIfAborted(signal);
         const payloads = [
           ...responsePayloads.splice(0),
-          await page.evaluate(() => window.__INITIAL_STATE__ ?? null),
+          await initialState(page),
         ];
         let note = null;
         for (const payload of payloads) {

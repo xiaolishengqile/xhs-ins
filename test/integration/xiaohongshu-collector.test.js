@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { chromium } from "playwright";
 
 import { XiaohongshuCollector } from "../../src/collectors/xiaohongshu/collector.js";
 import { LoginRequiredError } from "../../src/collectors/errors.js";
@@ -40,6 +41,7 @@ class FakePage {
     const source = String(callback);
     if (source.includes("innerText")) return this.bodyText;
     if (source.includes("scroll")) return undefined;
+    if (source.includes("JSON.stringify")) return JSON.stringify(this.current);
     return this.current;
   }
 
@@ -124,4 +126,43 @@ test("开始采集前取消会立即终止", async () => {
     () => collector.collect(task(), { signal: controller.signal, onProgress: async () => {} }),
     { name: "AbortError" },
   );
+});
+
+test("页面初始状态引用链过深且存在循环引用时仍可采集必要数据", async (t) => {
+  const profile = await fixture("profile-state.json");
+  profile.data.notes = [profile.data.notes[0]];
+  const detail = await fixture("note-detail.json");
+  const browser = await chromium.launch({ headless: true });
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  await page.route("https://www.xiaohongshu.com/**", async (route) => {
+    const payload = new URL(route.request().url()).pathname.startsWith("/explore/") ? detail : profile;
+    const body = `<meta charset="utf-8"><body>公开主页</body><script>
+      const state = ${JSON.stringify(payload)};
+      let current = state;
+      for (let index = 0; index < 500; index += 1) current = current.deep = {};
+      current.circular = state;
+      window.__INITIAL_STATE__ = state;
+    </script>`;
+    await route.fulfill({ status: 200, contentType: "text/html", body });
+  });
+  const collectorPage = {
+    goto: (...args) => page.goto(...args),
+    evaluate: (...args) => page.evaluate(...args),
+    waitForTimeout: async () => {},
+    on: (...args) => page.on(...args),
+    off: (...args) => page.off(...args),
+    close: () => page.close(),
+  };
+  const collector = new XiaohongshuCollector({
+    browserManager: { newPage: async () => collectorPage },
+  });
+
+  const result = await collector.collect(task(), {
+    signal: new AbortController().signal,
+    onProgress: async () => {},
+  });
+
+  assert.equal(result.author, "测试博主");
+  assert.deepEqual(result.notes.map((note) => note.id), ["note-image-1"]);
 });
