@@ -51,7 +51,10 @@ test("六次提交会显示五个运行任务和一个等待任务且表单保�
   }
 
   await page.locator("[data-task-id]").first().waitFor();
-  await page.waitForFunction(() => document.querySelectorAll('[data-status="running"]').length === 5);
+  await page.waitForFunction(() =>
+    document.querySelectorAll('[data-status="running"]').length === 5 &&
+    document.querySelectorAll('[data-status="queued"]').length === 1,
+  );
   assert.equal(await page.locator('[data-status="running"]').count(), 5);
   assert.equal(await page.locator('[data-status="queued"]').count(), 1);
   assert.equal(await page.getByTestId("running-summary").textContent(), "5 / 5");

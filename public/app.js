@@ -18,7 +18,8 @@ const STATUS = {
   cancelled: "已取消",
 };
 
-let refreshing = false;
+let refreshPromise = null;
+let refreshAgain = false;
 
 function node(tag, className, text) {
   const element = document.createElement(tag);
@@ -100,17 +101,25 @@ function render(tasks) {
   taskList.replaceChildren(...tasks.map(renderTask));
 }
 
-async function refresh() {
-  if (refreshing) return;
-  refreshing = true;
-  try {
-    render((await request("/api/tasks")).tasks);
-    refreshStatus.textContent = `已更新 ${new Date().toLocaleTimeString("zh-CN", { hour12: false })}`;
-  } catch (error) {
-    refreshStatus.textContent = error.message;
-  } finally {
-    refreshing = false;
+function refresh() {
+  if (refreshPromise) {
+    refreshAgain = true;
+    return refreshPromise;
   }
+  refreshPromise = (async () => {
+    do {
+      refreshAgain = false;
+      try {
+        render((await request("/api/tasks")).tasks);
+        refreshStatus.textContent = `已更新 ${new Date().toLocaleTimeString("zh-CN", { hour12: false })}`;
+      } catch (error) {
+        refreshStatus.textContent = error.message;
+      }
+    } while (refreshAgain);
+  })().finally(() => {
+    refreshPromise = null;
+  });
+  return refreshPromise;
 }
 
 presetInput.addEventListener("change", () => {
