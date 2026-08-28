@@ -1,0 +1,27 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
+import { TaskStore } from "../../src/tasks/task-store.js";
+
+test("任务状态按任务目录原子保存并可重新加载", async (t) => {
+  const rootDir = await mkdtemp(path.join(tmpdir(), "collector-store-"));
+  t.after(() => rm(rootDir, { recursive: true, force: true }));
+  const store = new TaskStore(rootDir);
+  const task = { id: "123e4567-e89b-12d3-a456-426614174000", status: "queued", progress: { current: 0 } };
+
+  await store.save(task);
+
+  assert.deepEqual(await store.loadAll(), [task]);
+  assert.deepEqual(await readdir(store.taskDir(task.id)), ["task.json"]);
+});
+
+test("任务目录拒绝路径穿越", async (t) => {
+  const rootDir = await mkdtemp(path.join(tmpdir(), "collector-store-"));
+  t.after(() => rm(rootDir, { recursive: true, force: true }));
+  const store = new TaskStore(rootDir);
+
+  assert.throws(() => store.taskDir("../../outside"), /任务编号/);
+});
