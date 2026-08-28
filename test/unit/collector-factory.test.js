@@ -280,6 +280,23 @@ test("采集器工厂按平台创建实例并拒绝未知平台", () => {
   assert.throws(() => factory("unknown"), /不支持的平台/);
 });
 
+test("采集器工厂可以为单次任务注入浏览器会话", () => {
+  class InstagramCollector {
+    constructor(options) {
+      this.options = options;
+    }
+  }
+  const platformBrowserManager = { name: "platform" };
+  const taskBrowserSession = { name: "task" };
+  const factory = createCollectorFactory({
+    browserManager: platformBrowserManager,
+    collectors: { instagram: InstagramCollector },
+  });
+
+  assert.equal(factory("instagram", taskBrowserSession).options.browserManager, taskBrowserSession);
+  assert.equal(factory("instagram").options.browserManager, platformBrowserManager);
+});
+
 test("人工登录和验证码错误具有统一任务标记", () => {
   for (const error of [new LoginRequiredError(), new VerificationRequiredError()]) {
     assert.equal(error.code, "HUMAN_ACTION_REQUIRED");

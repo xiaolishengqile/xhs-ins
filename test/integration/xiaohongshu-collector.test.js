@@ -94,7 +94,7 @@ test("采集范围内图文并跳过视频和旧笔记", async () => {
   assert.deepEqual(result.notes.map((note) => note.id), ["note-image-1"]);
   assert.ok(!page.visited.some((url) => url.includes("note-video-1")));
   assert.ok(!page.visited.some((url) => url.includes("note-old-1")));
-  assert.equal(page.closed, true);
+  assert.equal(page.closed, false);
   assert.ok(progress.some((value) => value.stage === "读取笔记详情" && value.current === 1 && value.total === 1));
 });
 

@@ -99,7 +99,6 @@ export class InstagramCollector {
     const profilePage = await this.browserManager.newPage("instagram");
     let detailPage;
     let activePage = profilePage;
-    let retainedPage = null;
     try {
       detailPage = await this.browserManager.newPage("instagram");
       await profilePage.goto(task.profileUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
@@ -154,18 +153,13 @@ export class InstagramCollector {
           await profilePage.waitForTimeout(800);
         }
       }
-      await this.browserManager.closeHumanActionPages?.("instagram");
       return { author, notes };
     } catch (error) {
       if (error?.code === "HUMAN_ACTION_REQUIRED") {
-        retainedPage = activePage;
         await activePage.bringToFront?.();
         await this.browserManager.retainPageForHumanAction?.("instagram", activePage);
       }
       throw error;
-    } finally {
-      const pagesToClose = [profilePage, detailPage].filter((page) => page && page !== retainedPage);
-      await Promise.allSettled(pagesToClose.map((page) => page.close()));
     }
   }
 }

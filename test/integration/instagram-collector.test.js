@@ -116,8 +116,8 @@ test("滚动主页并只保留范围内公开帖子图片", async () => {
     result.notes[0].media.map((item) => item.url),
     ["https://scontent.cdninstagram.com/photo-1.jpg", "https://scontent.cdninstagram.com/photo-2.jpg"],
   );
-  assert.equal(profilePage.closed, true);
-  assert.equal(detailPage.closed, true);
+  assert.equal(profilePage.closed, false);
+  assert.equal(detailPage.closed, false);
   assert.equal(profilePage.frontCount, 1);
   assert.ok(progress.some((value) => value.stage === "读取帖子详情"));
 });
@@ -178,7 +178,7 @@ test("公开主页被登录墙遮挡时等待人工登录", async () => {
   );
   assert.equal(retainedPage, profilePage);
   assert.equal(profilePage.closed, false);
-  assert.equal(detailPage.closed, true);
+  assert.equal(detailPage.closed, false);
 });
 
 test("短视频链接不会打开或返回", async () => {

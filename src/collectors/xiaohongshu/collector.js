@@ -66,8 +66,6 @@ export class XiaohongshuCollector {
       pending.finally(() => pendingResponses.delete(pending));
     };
     profilePage.on?.("response", responseListener);
-    let retainedPage = null;
-
     try {
       await profilePage.goto(task.profileUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
       await profilePage.waitForTimeout(800);
@@ -141,11 +139,9 @@ export class XiaohongshuCollector {
         await onProgress({ stage: "读取笔记详情", current: index + 1, total: selected.length });
       }
 
-      await this.browserManager.closeHumanActionPages?.("xiaohongshu");
       return { author: author || notes[0]?.author || task.profileKey, notes };
     } catch (error) {
       if (error?.code === "HUMAN_ACTION_REQUIRED") {
-        retainedPage = activePage;
         await activePage.bringToFront?.();
         await this.browserManager.retainPageForHumanAction?.("xiaohongshu", activePage);
       }
@@ -153,8 +149,6 @@ export class XiaohongshuCollector {
     } finally {
       profilePage.off?.("response", responseListener);
       if (detailPage && detailPage !== profilePage) detailPage.off?.("response", responseListener);
-      const pagesToClose = [...new Set([profilePage, detailPage])].filter((page) => page && page !== retainedPage);
-      await Promise.allSettled(pagesToClose.map((page) => page.close()));
     }
   }
 }
