@@ -8,6 +8,10 @@ const message = document.querySelector("#form-message");
 const taskList = document.querySelector("#task-list");
 const emptyState = document.querySelector("#empty-state");
 const refreshStatus = document.querySelector("#refresh-status");
+const bulkActions = document.querySelector("#bulk-actions");
+const selectAllTasks = document.querySelector("#select-all-tasks");
+const selectionCount = document.querySelector("#selection-count");
+const deleteSelected = document.querySelector("#delete-selected");
 
 const STATUS = {
   queued: "等待中",
@@ -21,6 +25,9 @@ const STATUS = {
 let refreshPromise = null;
 let refreshAgain = false;
 let hasActiveTasks = false;
+let currentTasks = [];
+let bulkDeleting = false;
+const selectedTaskIds = new Set();
 
 function node(tag, className, text) {
   const element = document.createElement(tag);
@@ -54,8 +61,15 @@ function renderTask(task) {
   card.dataset.status = task.status;
 
   const top = node("div", "task-top");
+  const identity = node("div", "task-identity");
+  const checkbox = node("input", "task-select");
+  checkbox.type = "checkbox";
+  checkbox.checked = selectedTaskIds.has(task.id);
+  checkbox.dataset.taskSelect = task.id;
+  checkbox.setAttribute("aria-label", `选择任务 ${task.author || task.profileKey}`);
+  identity.append(checkbox, node("span", "task-platform", task.platform === "xiaohongshu" ? "小红书" : "Instagram"));
   top.append(
-    node("span", "task-platform", task.platform === "xiaohongshu" ? "小红书" : "Instagram"),
+    identity,
     node("span", "status-pill", STATUS[task.status] ?? task.status),
   );
   card.append(top);
@@ -94,7 +108,22 @@ function renderTask(task) {
   return card;
 }
 
+function updateBulkActions() {
+  const selectedCount = selectedTaskIds.size;
+  bulkActions.hidden = currentTasks.length === 0;
+  selectAllTasks.checked = currentTasks.length > 0 && selectedCount === currentTasks.length;
+  selectAllTasks.indeterminate = selectedCount > 0 && selectedCount < currentTasks.length;
+  selectionCount.textContent = `已选 ${selectedCount} 项`;
+  deleteSelected.textContent = `删除选中（${selectedCount}）`;
+  deleteSelected.disabled = bulkDeleting || selectedCount === 0;
+}
+
 function render(tasks) {
+  currentTasks = tasks;
+  const availableIds = new Set(tasks.map((task) => task.id));
+  for (const id of selectedTaskIds) {
+    if (!availableIds.has(id)) selectedTaskIds.delete(id);
+  }
   hasActiveTasks = tasks.some((task) => ["queued", "running"].includes(task.status));
   const running = tasks.filter((task) => task.status === "running").length;
   const queued = tasks.filter((task) => task.status === "queued").length;
@@ -104,6 +133,7 @@ function render(tasks) {
   document.querySelector("#completed-summary").textContent = String(completed);
   emptyState.hidden = tasks.length > 0;
   taskList.replaceChildren(...tasks.map(renderTask));
+  updateBulkActions();
 }
 
 function refresh() {
@@ -190,6 +220,47 @@ taskList.addEventListener("click", async (event) => {
     message.textContent = error.message;
   } finally {
     button.disabled = false;
+  }
+});
+
+taskList.addEventListener("change", (event) => {
+  const checkbox = event.target.closest("input[data-task-select]");
+  if (!checkbox) return;
+  if (checkbox.checked) selectedTaskIds.add(checkbox.dataset.taskSelect);
+  else selectedTaskIds.delete(checkbox.dataset.taskSelect);
+  updateBulkActions();
+});
+
+selectAllTasks.addEventListener("change", () => {
+  selectedTaskIds.clear();
+  if (selectAllTasks.checked) {
+    for (const task of currentTasks) selectedTaskIds.add(task.id);
+  }
+  for (const checkbox of taskList.querySelectorAll("input[data-task-select]")) {
+    checkbox.checked = selectedTaskIds.has(checkbox.dataset.taskSelect);
+  }
+  updateBulkActions();
+});
+
+deleteSelected.addEventListener("click", async () => {
+  const ids = [...selectedTaskIds];
+  if (ids.length === 0 || bulkDeleting) return;
+  if (!window.confirm(`将停止并永久删除选中的 ${ids.length} 个任务及其结果文件。确定删除吗？`)) return;
+  bulkDeleting = true;
+  updateBulkActions();
+  try {
+    const results = await Promise.allSettled(ids.map((id) => request(`/api/tasks/${id}`, { method: "DELETE" })));
+    results.forEach((result, index) => {
+      if (result.status === "fulfilled") selectedTaskIds.delete(ids[index]);
+    });
+    const failedCount = results.filter((result) => result.status === "rejected").length;
+    message.textContent = failedCount === 0
+      ? `已删除 ${ids.length} 个任务。`
+      : `已删除 ${ids.length - failedCount} 个任务，${failedCount} 个删除失败。`;
+    await refresh();
+  } finally {
+    bulkDeleting = false;
+    updateBulkActions();
   }
 });
 

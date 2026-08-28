@@ -20,6 +20,7 @@ class FakePage {
     this.current = profile;
     this.visited = [];
     this.listeners = new Map();
+    this.frontCount = 0;
     this.closed = false;
   }
 
@@ -46,6 +47,10 @@ class FakePage {
   }
 
   async waitForTimeout() {}
+
+  async bringToFront() {
+    this.frontCount += 1;
+  }
 
   async close() {
     this.closed = true;
@@ -114,6 +119,27 @@ test("主页没有可用笔记编号且显示登录提示时等待人工登录",
   );
   assert.equal(retainedPage, page);
   assert.equal(page.closed, false);
+});
+
+test("读取笔记详情时主页保持在前台", async () => {
+  const profile = await fixture("profile-state.json");
+  profile.data.notes = [profile.data.notes[0]];
+  const detail = await fixture("note-detail.json");
+  const profilePage = new FakePage({ profile, details: { "note-image-1": detail } });
+  const detailPage = new FakePage({ profile, details: { "note-image-1": detail } });
+  const pages = [profilePage, detailPage];
+  const collector = new XiaohongshuCollector({
+    browserManager: { newPage: async () => pages.shift() },
+  });
+
+  const result = await collector.collect(task(), {
+    signal: new AbortController().signal,
+    onProgress: async () => {},
+  });
+
+  assert.deepEqual(result.notes.map((note) => note.id), ["note-image-1"]);
+  assert.equal(profilePage.frontCount, 1);
+  assert.ok(detailPage.visited.some((url) => url.includes("note-image-1")));
 });
 
 test("开始采集前取消会立即终止", async () => {

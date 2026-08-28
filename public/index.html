@@ -87,6 +87,16 @@
             </div>
             <span id="refresh-status" class="refresh-status">自动刷新</span>
           </div>
+          <div id="bulk-actions" class="bulk-actions" hidden>
+            <label class="bulk-select-all">
+              <input id="select-all-tasks" type="checkbox" aria-label="全选任务" />
+              <span>全选</span>
+            </label>
+            <span id="selection-count">已选 0 项</span>
+            <button id="delete-selected" class="task-action task-action-danger" type="button" disabled>
+              删除选中（0）
+            </button>
+          </div>
           <div id="empty-state" class="empty-state">
             <span>还没有任务</span>
             <p>在上方粘贴公开博主主页链接即可开始，每行一条。</p>

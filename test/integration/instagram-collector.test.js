@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { chromium } from "playwright";
 
 import { InstagramCollector } from "../../src/collectors/instagram/collector.js";
 import { LoginRequiredError } from "../../src/collectors/errors.js";
@@ -9,6 +10,7 @@ class ProfilePage {
   constructor(links, bodyText = "Public profile") {
     this.links = links;
     this.bodyText = bodyText;
+    this.frontCount = 0;
     this.closed = false;
   }
 
@@ -20,6 +22,10 @@ class ProfilePage {
   }
 
   async waitForTimeout() {}
+
+  async bringToFront() {
+    this.frontCount += 1;
+  }
 
   async close() {
     this.closed = true;
@@ -112,7 +118,46 @@ test("滚动主页并只保留范围内公开帖子图片", async () => {
   );
   assert.equal(profilePage.closed, true);
   assert.equal(detailPage.closed, true);
+  assert.equal(profilePage.frontCount, 1);
   assert.ok(progress.some((value) => value.stage === "读取帖子详情"));
+});
+
+test("延迟出现且包含博主名的帖子链接可以采集", async (t) => {
+  const postHtml = await readFile(new URL("../fixtures/instagram/post.html", import.meta.url), "utf8");
+  const browser = await chromium.launch({ headless: true });
+  t.after(() => browser.close());
+  const profilePage = await browser.newPage();
+  const detailPage = await browser.newPage();
+  await Promise.all([profilePage, detailPage].map((page) => page.route("https://www.instagram.com/**", async (route) => {
+    const pathname = new URL(route.request().url()).pathname;
+    if (pathname === "/test.creator/") {
+      await route.fulfill({
+        status: 200,
+        contentType: "text/html",
+        body: `<body>Public profile<script>
+          setTimeout(() => {
+            const link = document.createElement("a");
+            link.href = "/test.creator/p/shortcode-1/";
+            link.textContent = "post";
+            document.body.append(link);
+          }, 2200);
+        </script></body>`,
+      });
+      return;
+    }
+    await route.fulfill({ status: 200, contentType: "text/html", body: postHtml });
+  })));
+  const pages = [profilePage, detailPage];
+  const collector = new InstagramCollector({
+    browserManager: { newPage: async () => pages.shift() },
+  });
+
+  const result = await collector.collect(task(), {
+    signal: new AbortController().signal,
+    onProgress: async () => {},
+  });
+
+  assert.deepEqual(result.notes.map((note) => note.id), ["shortcode-1"]);
 });
 
 test("公开主页被登录墙遮挡时等待人工登录", async () => {

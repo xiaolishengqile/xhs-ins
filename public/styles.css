@@ -237,6 +237,38 @@ textarea:focus {
   min-height: 240px;
 }
 
+.bulk-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: -8px 0 18px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.bulk-actions[hidden] {
+  display: none;
+}
+
+.bulk-select-all,
+.task-identity {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.bulk-actions input,
+.task-select {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  accent-color: var(--accent);
+}
+
+.bulk-actions .task-action {
+  margin-left: auto;
+}
+
 .empty-state {
   border: 1px dashed rgba(32, 29, 26, 0.2);
   border-radius: 20px;

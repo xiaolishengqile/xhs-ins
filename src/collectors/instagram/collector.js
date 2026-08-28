@@ -15,7 +15,7 @@ function normalizedPostUrl(value) {
   try {
     const url = new URL(value, "https://www.instagram.com/");
     if (url.protocol !== "https:" || !["instagram.com", "www.instagram.com"].includes(url.hostname)) return null;
-    const match = url.pathname.match(/^\/p\/([^/]+)\/?/);
+    const match = url.pathname.match(/^\/(?:[^/]+\/)?p\/([^/]+)\/?/);
     return match ? `https://www.instagram.com/p/${match[1]}/` : null;
   } catch {
     return null;
@@ -33,6 +33,21 @@ function mergeVisibleImages(note, images, hasVideo) {
   const urls = [...new Set([...metadataImages, ...images])];
   note.media = urls.map((url) => ({ url, type: "image", localPath: null, error: null }));
   return note;
+}
+
+async function readProfileSnapshot(page, signal) {
+  let snapshot = { links: [], bodyText: "" };
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    snapshot = await page.evaluate(() => ({
+      links: [...document.querySelectorAll('a[href*="/p/"], a[href*="/reel/"]')].map((item) => item.href),
+      bodyText: document.body?.innerText ?? "",
+    }));
+    if (snapshot.links.length > 0) return snapshot;
+    checkPageText(snapshot.bodyText, true);
+    await page.waitForTimeout(300);
+    throwIfAborted(signal);
+  }
+  return snapshot;
 }
 
 async function readPostDetail(page, signal) {
@@ -89,6 +104,7 @@ export class InstagramCollector {
       detailPage = await this.browserManager.newPage("instagram");
       await profilePage.goto(task.profileUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
       await profilePage.waitForTimeout(800);
+      await profilePage.bringToFront?.();
       const seen = new Set();
       const notes = [];
       let author = task.profileKey;
@@ -99,10 +115,7 @@ export class InstagramCollector {
       while (unchangedRounds < 2 && !stop) {
         throwIfAborted(signal);
         activePage = profilePage;
-        const snapshot = await profilePage.evaluate(() => ({
-          links: [...document.querySelectorAll('a[href^="/p/"], a[href^="/reel/"]')].map((item) => item.href),
-          bodyText: document.body?.innerText ?? "",
-        }));
+        const snapshot = await readProfileSnapshot(profilePage, signal);
         const links = snapshot.links.map(normalizedPostUrl).filter(Boolean);
         const fresh = links.filter((url) => !seen.has(url));
         checkPageText(snapshot.bodyText, seen.size === 0 && fresh.length === 0);
@@ -146,6 +159,7 @@ export class InstagramCollector {
     } catch (error) {
       if (error?.code === "HUMAN_ACTION_REQUIRED") {
         retainedPage = activePage;
+        await activePage.bringToFront?.();
         await this.browserManager.retainPageForHumanAction?.("instagram", activePage);
       }
       throw error;

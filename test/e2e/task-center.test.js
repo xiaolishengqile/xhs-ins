@@ -9,6 +9,7 @@ import { createApp } from "../../src/app.js";
 import { startServer } from "../../src/http/server.js";
 import { TaskManager } from "../../src/tasks/task-manager.js";
 import { TaskStore } from "../../src/tasks/task-store.js";
+import { eventually } from "../helpers/eventually.js";
 
 async function fixture(t, collect) {
   const rootDir = await mkdtemp(path.join(tmpdir(), "collector-e2e-"));
@@ -144,4 +145,45 @@ test("任务卡片可以确认后永久删除", async (t) => {
 
   await page.getByText("还没有任务").waitFor();
   assert.equal(manager.list().length, 0);
+});
+
+test("全选后可以一次删除所有任务", async (t) => {
+  const { manager, page, url } = await fixture(t, async (task) => ({ author: task.profileKey, notes: [] }));
+  for (let index = 0; index < 3; index += 1) {
+    await manager.create({
+      url: `https://www.instagram.com/bulk_remove_${index}/`,
+      range: { preset: "week" },
+    });
+  }
+  await eventually(() => assert.ok(manager.list().every((task) => task.status === "completed")));
+  await page.goto(url);
+
+  await page.getByRole("checkbox", { name: "全选任务" }).check();
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "删除选中（3）" }).click();
+
+  await page.getByText("还没有任务").waitFor();
+  assert.equal(manager.list().length, 0);
+});
+
+test("批量删除只移除勾选的任务", async (t) => {
+  const { manager, page, url } = await fixture(t, async (task) => ({ author: task.profileKey, notes: [] }));
+  for (let index = 0; index < 3; index += 1) {
+    await manager.create({
+      url: `https://www.instagram.com/partial_remove_${index}/`,
+      range: { preset: "week" },
+    });
+  }
+  await eventually(() => assert.ok(manager.list().every((task) => task.status === "completed")));
+  await page.goto(url);
+  const cards = page.locator("[data-task-id]");
+
+  await cards.nth(0).getByRole("checkbox").check();
+  await cards.nth(1).getByRole("checkbox").check();
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "删除选中（2）" }).click();
+
+  await eventually(() => assert.equal(manager.list().length, 1));
+  await page.waitForFunction(() => document.querySelectorAll("[data-task-id]").length === 1);
+  assert.equal(await page.locator("[data-task-id]").count(), 1);
 });

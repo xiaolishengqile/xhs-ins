@@ -53,7 +53,9 @@ export class XiaohongshuCollector {
 
   async collect(task, { signal, onProgress }) {
     throwIfAborted(signal);
-    const page = await this.browserManager.newPage("xiaohongshu");
+    const profilePage = await this.browserManager.newPage("xiaohongshu");
+    let detailPage;
+    let activePage = profilePage;
     const responsePayloads = [];
     const pendingResponses = new Set();
     const responseListener = (response) => {
@@ -63,12 +65,12 @@ export class XiaohongshuCollector {
       pendingResponses.add(pending);
       pending.finally(() => pendingResponses.delete(pending));
     };
-    page.on?.("response", responseListener);
-    let retainedForHumanAction = false;
+    profilePage.on?.("response", responseListener);
+    let retainedPage = null;
 
     try {
-      await page.goto(task.profileUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
-      await page.waitForTimeout(800);
+      await profilePage.goto(task.profileUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
+      await profilePage.waitForTimeout(800);
       throwIfAborted(signal);
 
       const candidates = new Map();
@@ -77,7 +79,7 @@ export class XiaohongshuCollector {
       while (unchangedRounds < 2) {
         await Promise.allSettled([...pendingResponses]);
         const payloads = responsePayloads.splice(0);
-        payloads.push(await initialState(page));
+        payloads.push(await initialState(profilePage));
         const before = candidates.size;
         const addedThisRound = [];
         for (const payload of payloads) {
@@ -94,31 +96,37 @@ export class XiaohongshuCollector {
         const chronological = addedThisRound.filter((item) => !item.pinned && item.publishedAt);
         if (chronological.length > 0 && chronological.every((item) => new Date(item.publishedAt) < new Date(task.from))) break;
         if (unchangedRounds >= 2) break;
-        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-        await page.waitForTimeout(800);
+        await profilePage.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+        await profilePage.waitForTimeout(800);
         throwIfAborted(signal);
       }
 
       const allCandidates = [...candidates.values()];
       const usable = allCandidates.filter((item) => item.id);
-      if (allCandidates.length > 0 && usable.length === 0) await checkHumanAction(page, true);
+      if (allCandidates.length > 0 && usable.length === 0) await checkHumanAction(profilePage, true);
       if (allCandidates.length > 0 && usable.length === 0) throw new LoginRequiredError("公开主页未返回笔记编号，请先登录");
-      await checkHumanAction(page, usable.length === 0);
+      await checkHumanAction(profilePage, usable.length === 0);
 
       const selected = usable.filter((item) => item.type !== "video" && inRange(item.publishedAt, task.from, task.to));
       const notes = [];
+      if (selected.length > 0) {
+        detailPage = await this.browserManager.newPage("xiaohongshu");
+        if (detailPage !== profilePage) detailPage.on?.("response", responseListener);
+        await profilePage.bringToFront?.();
+      }
       for (let index = 0; index < selected.length; index += 1) {
         throwIfAborted(signal);
+        activePage = detailPage;
         const item = selected[index];
         const url = detailUrl(item);
         responsePayloads.length = 0;
-        await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
-        await page.waitForTimeout(600);
+        await detailPage.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
+        await detailPage.waitForTimeout(600);
         await Promise.allSettled([...pendingResponses]);
         throwIfAborted(signal);
         const payloads = [
           ...responsePayloads.splice(0),
-          await initialState(page),
+          await initialState(detailPage),
         ];
         let note = null;
         for (const payload of payloads) {
@@ -126,7 +134,7 @@ export class XiaohongshuCollector {
           if (note) break;
         }
         if (!note) {
-          await checkHumanAction(page, true);
+          await checkHumanAction(detailPage, true);
           throw new Error(`无法读取笔记详情：${item.title || item.id}`);
         }
         if (note.type !== "video" && inRange(note.publishedAt, task.from, task.to)) notes.push(note);
@@ -137,13 +145,16 @@ export class XiaohongshuCollector {
       return { author: author || notes[0]?.author || task.profileKey, notes };
     } catch (error) {
       if (error?.code === "HUMAN_ACTION_REQUIRED") {
-        retainedForHumanAction = true;
-        await this.browserManager.retainPageForHumanAction?.("xiaohongshu", page);
+        retainedPage = activePage;
+        await activePage.bringToFront?.();
+        await this.browserManager.retainPageForHumanAction?.("xiaohongshu", activePage);
       }
       throw error;
     } finally {
-      page.off?.("response", responseListener);
-      if (!retainedForHumanAction) await page.close();
+      profilePage.off?.("response", responseListener);
+      if (detailPage && detailPage !== profilePage) detailPage.off?.("response", responseListener);
+      const pagesToClose = [...new Set([profilePage, detailPage])].filter((page) => page && page !== retainedPage);
+      await Promise.allSettled(pagesToClose.map((page) => page.close()));
     }
   }
 }
