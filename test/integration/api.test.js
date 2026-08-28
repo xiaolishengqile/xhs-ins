@@ -9,6 +9,7 @@ import { startServer } from "../../src/http/server.js";
 import { TaskManager } from "../../src/tasks/task-manager.js";
 import { TaskStore } from "../../src/tasks/task-store.js";
 import { eventually } from "../helpers/eventually.js";
+import { readZipEntries } from "../helpers/zip.js";
 
 async function fixture(t, collect = async (task) => ({ author: task.profileKey, notes: [] })) {
   const rootDir = await mkdtemp(path.join(tmpdir(), "collector-api-"));
@@ -186,4 +187,57 @@ test("批量创建会跳过无效和重复链接并返回任务摘要", async (t
   ]);
   assert.equal(result.body.control.maxConcurrency, 5);
   assert.equal(manager.list().length, 2);
+});
+
+test("控制接口可以幂等暂停和继续调度器", async (t) => {
+  const { url } = await fixture(t);
+
+  const initial = await json(await fetch(`${url}/api/control`));
+  assert.equal(initial.response.status, 200);
+  assert.deepEqual(initial.body, {
+    paused: false,
+    maxConcurrency: 5,
+    running: 0,
+    queued: 0,
+    pausedTasks: 0,
+  });
+
+  const paused = await json(await fetch(`${url}/api/control/pause`, { method: "POST" }));
+  const pausedAgain = await json(await fetch(`${url}/api/control/pause`, { method: "POST" }));
+  assert.equal(paused.body.paused, true);
+  assert.equal(pausedAgain.body.paused, true);
+
+  const resumed = await json(await fetch(`${url}/api/control/resume`, { method: "POST" }));
+  const resumedAgain = await json(await fetch(`${url}/api/control/resume`, { method: "POST" }));
+  assert.equal(resumed.body.paused, false);
+  assert.equal(resumedAgain.body.paused, false);
+});
+
+test("汇总下载包含点击时所有可用的完成任务", async (t) => {
+  const { url, manager } = await fixture(t);
+  const empty = await json(await fetch(`${url}/api/tasks/download-completed`));
+  assert.equal(empty.response.status, 409);
+  assert.match(empty.body.error, /没有可下载/);
+
+  const first = await manager.create({
+    url: "https://www.instagram.com/all_one/",
+    range: { preset: "week" },
+  });
+  const second = await manager.create({
+    url: "https://www.xiaohongshu.com/user/profile/all-two",
+    range: { preset: "week" },
+  });
+  await eventually(() => assert.ok(manager.list().every((task) => task.status === "completed")));
+
+  const response = await fetch(`${url}/api/tasks/download-completed`);
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("content-type"), "application/zip");
+  assert.match(response.headers.get("content-disposition"), /attachment/);
+  const archivePath = path.join(manager.store.rootDir, "completed.zip");
+  await writeFile(archivePath, Buffer.from(await response.arrayBuffer()));
+  const entries = await readZipEntries(archivePath);
+  assert.equal([...entries.keys()].filter((name) => name.endsWith(".zip")).length, 2);
+  const manifest = entries.get("manifest.json").toString("utf8");
+  assert.match(manifest, new RegExp(first.id));
+  assert.match(manifest, new RegExp(second.id));
 });

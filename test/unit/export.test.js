@@ -1,14 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { createWriteStream } from "node:fs";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { pipeline } from "node:stream/promises";
 
 import { toCsv } from "../../src/export/csv.js";
 import { mediaExtension, safeFileName } from "../../src/export/file-names.js";
 import { downloadMedia } from "../../src/export/media-downloader.js";
 import { createTaskArchive } from "../../src/export/archive.js";
+import { createCompletedArchive } from "../../src/export/completed-archive.js";
+import { readZipEntries } from "../helpers/zip.js";
 
 test("数据表正确转义中文标题、逗号和换行", () => {
   const csv = toCsv([
@@ -104,7 +107,50 @@ test("压缩包包含数据表和已下载图片", async (t) => {
   const archivePath = await createTaskArchive(task, notes, taskDir);
 
   assert.ok((await stat(archivePath)).size > 0);
-  const entries = execFileSync("unzip", ["-Z1", archivePath], { encoding: "utf8" });
-  assert.match(entries, /notes\.csv/);
-  assert.match(entries, /images\/2026-08-28-n1\/01\.jpg/);
+  const entries = await readZipEntries(archivePath);
+  assert.ok([...entries.keys()].some((name) => name.endsWith("/notes.csv")));
+  assert.ok([...entries.keys()].some((name) => name.endsWith("/images/2026-08-28-n1/01.jpg")));
+});
+
+test("汇总压缩只加入存在的完成任务并写入遗漏清单", async (t) => {
+  const rootDir = await mkdtemp(path.join(tmpdir(), "collector-completed-"));
+  t.after(() => rm(rootDir, { recursive: true, force: true }));
+  const firstPath = path.join(rootDir, "first.zip");
+  await writeFile(firstPath, "first-result");
+
+  const archive = await createCompletedArchive([
+    {
+      id: "first-id",
+      status: "completed",
+      platform: "instagram",
+      author: "作者",
+      profileKey: "author",
+      resultPath: firstPath,
+    },
+    {
+      id: "missing-id",
+      status: "completed",
+      platform: "instagram",
+      author: "缺失",
+      profileKey: "missing",
+      resultPath: path.join(rootDir, "missing.zip"),
+    },
+    { id: "running-id", status: "running", resultPath: firstPath },
+  ]);
+  const target = path.join(rootDir, "all.zip");
+  await pipeline(archive.outputStream, createWriteStream(target));
+
+  const entries = await readZipEntries(target);
+  assert.equal([...entries.keys()].filter((name) => name.endsWith(".zip")).length, 1);
+  assert.equal(entries.get([...entries.keys()].find((name) => name.endsWith(".zip"))).toString(), "first-result");
+  assert.match(entries.get("manifest.json").toString("utf8"), /missing-id/);
+  assert.equal(archive.included.length, 1);
+  assert.equal(archive.missing.length, 1);
+});
+
+test("没有可用完成结果时不生成空汇总压缩包", async () => {
+  await assert.rejects(
+    () => createCompletedArchive([{ id: "running", status: "running", resultPath: null }]),
+    (error) => error.statusCode === 409 && /没有可下载/.test(error.message),
+  );
 });

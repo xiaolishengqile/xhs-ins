@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { readJson } from "./body.js";
+import { createCompletedArchive } from "../export/completed-archive.js";
 
 const DEFAULT_PUBLIC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../public");
 const STATIC_FILES = new Map([
@@ -58,6 +59,27 @@ async function handleRequest(request, response, { manager, publicDir }) {
   }
   if (request.method === "GET" && pathname === "/api/tasks") {
     return sendJson(response, 200, { tasks: manager.list() });
+  }
+  if (request.method === "GET" && pathname === "/api/control") {
+    return sendJson(response, 200, manager.controlStatus());
+  }
+  if (request.method === "POST" && pathname === "/api/control/pause") {
+    return sendJson(response, 200, await manager.pauseAll());
+  }
+  if (request.method === "POST" && pathname === "/api/control/resume") {
+    return sendJson(response, 200, await manager.resumeAll());
+  }
+  if (request.method === "GET" && pathname === "/api/tasks/download-completed") {
+    const archive = await createCompletedArchive(manager.list());
+    response.writeHead(200, {
+      "content-type": "application/zip",
+      "content-disposition": 'attachment; filename="completed-tasks.zip"',
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff",
+    });
+    archive.outputStream.once("error", (error) => response.destroy(error));
+    archive.outputStream.pipe(response);
+    return;
   }
   if (request.method === "POST" && pathname === "/api/tasks") {
     const task = await manager.create(await readJson(request));
