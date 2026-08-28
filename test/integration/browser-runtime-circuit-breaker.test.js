@@ -108,6 +108,27 @@ test("平台熔断期间启动新任务不会再次尝试浏览器", async (t) =
   assert.equal(browserAttempts, 1);
 });
 
+test("最后一个受阻任务取消后重试仍保留恢复入口", async (t) => {
+  let browserAttempts = 0;
+  const { manager } = await fixture(t, {
+    taskSessionFactory: async () => {
+      browserAttempts += 1;
+      throw new BrowserLaunchError([{ browser: "chrome", error: "系统终止浏览器" }]);
+    },
+  });
+  const task = await manager.create(input("instagram", "retry_blocked"));
+  await manager.start(task.id);
+  await eventually(() => assert.equal(manager.get(task.id).status, "blocked"));
+  await manager.cancel(task.id);
+
+  await manager.retry(task.id);
+
+  assert.equal(manager.get(task.id).status, "blocked");
+  assert.equal(manager.get(task.id).blockReason, "browser");
+  assert.equal(manager.controlStatus().queued, 0);
+  assert.equal(browserAttempts, 1);
+});
+
 test("服务重启后自动重新检测浏览器受阻任务", async (t) => {
   const rootDir = await mkdtemp(path.join(tmpdir(), "collector-browser-restart-"));
   const store = new TaskStore(path.join(rootDir, "tasks"));

@@ -239,6 +239,42 @@ test("默认系统浏览器启动失败时会切换另一款系统浏览器", as
   assert.deepEqual(launchedChannels, ["chrome", "msedge"]);
 });
 
+test("浏览器启动后无法创建空白页时会关闭并切换候选", async (t) => {
+  const profilesDir = await mkdtemp(path.join(tmpdir(), "collector-browser-"));
+  t.after(() => rm(profilesDir, { recursive: true, force: true }));
+  const launchedChannels = [];
+  let firstClosed = false;
+  const taskPage = { close: async () => {} };
+  const manager = new BrowserManager({
+    profilesDir,
+    browserLaunchOptions: async () => [{ channel: "chrome" }, { channel: "msedge" }],
+    launchPersistentContext: async (_directory, options) => {
+      launchedChannels.push(options.channel);
+      if (options.channel === "chrome") {
+        return {
+          pages: () => [],
+          newPage: async () => { throw new Error("浏览器刚启动就退出"); },
+          close: async () => { firstClosed = true; },
+        };
+      }
+      const keepalivePage = { url: () => "about:blank", close: async () => {} };
+      return {
+        pages: () => [keepalivePage],
+        newPage: async () => taskPage,
+        request: { get: async () => ({ ok: () => true, body: async () => Buffer.from("image") }) },
+        close: async () => {},
+      };
+    },
+  });
+  t.after(() => manager.close());
+
+  const page = await manager.newPage("instagram");
+
+  assert.equal(page, taskPage);
+  assert.equal(firstClosed, true);
+  assert.deepEqual(launchedChannels, ["chrome", "msedge"]);
+});
+
 test("所有系统浏览器启动失败时返回可识别的候选诊断", async (t) => {
   const profilesDir = await mkdtemp(path.join(tmpdir(), "collector-browser-"));
   t.after(() => rm(profilesDir, { recursive: true, force: true }));

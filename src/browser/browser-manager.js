@@ -156,9 +156,12 @@ export class BrowserManager {
   }
 
   async #launch(platform) {
-    const context = await this.#launchPersistent(platform, this.headless);
-    let keepalivePage = (context.pages?.() ?? []).find((page) => page.url?.() === "about:blank");
-    keepalivePage ??= await context.newPage();
+    const { context, prepared: keepalivePage } = await this.#launchPersistent(
+      platform,
+      this.headless,
+      async (candidate) => (candidate.pages?.() ?? []).find((page) => page.url?.() === "about:blank")
+        ?? candidate.newPage(),
+    );
     this.keepalivePages.set(platform, keepalivePage);
     context.on?.("close", () => {
       this.contexts.delete(platform);
@@ -172,8 +175,11 @@ export class BrowserManager {
 
   async #launchLogin(platform) {
     await this.#closeCollectionContext(platform);
-    const context = await this.#launchPersistent(platform, false);
-    const page = (context.pages?.() ?? [])[0] ?? await context.newPage();
+    const { context, prepared: page } = await this.#launchPersistent(
+      platform,
+      false,
+      async (candidate) => (candidate.pages?.() ?? [])[0] ?? candidate.newPage(),
+    );
     await page.goto(LOGIN_URLS[platform], { waitUntil: "domcontentloaded", timeout: 60_000 });
     return { context, page };
   }
@@ -190,7 +196,7 @@ export class BrowserManager {
     await context?.close().catch(() => {});
   }
 
-  async #launchPersistent(platform, headless) {
+  async #launchPersistent(platform, headless, prepare) {
     const profileDir = path.join(this.profilesDir, platform);
     await mkdir(profileDir, { recursive: true });
     const options = {
@@ -203,9 +209,13 @@ export class BrowserManager {
     let launchError;
     const attempts = [];
     for (const browserOptions of browserLaunchOptions) {
+      let context;
       try {
-        return await this.launchPersistentContext(profileDir, { ...options, ...browserOptions });
+        context = await this.launchPersistentContext(profileDir, { ...options, ...browserOptions });
+        const prepared = await prepare(context);
+        return { context, prepared };
       } catch (error) {
+        await context?.close().catch(() => {});
         launchError = error;
         attempts.push({ browser: launchCandidate(browserOptions), error: launchFailure(error) });
       }

@@ -141,13 +141,6 @@ export class TaskManager {
     if (this.paused) throw new Error("调度器已暂停，请先继续调度");
     const task = this.#requireTask(id);
     if (task.status !== TASK_STATUS.PENDING) throw new Error("只有待开始任务可以启动");
-    const block = this.platformBlocks.get(task.platform);
-    if (block) {
-      this.#applyBlock(task, block);
-      task.updatedAt = this.now().toISOString();
-      await this.store.save(task);
-      return clone(task);
-    }
     return this.#requeue(task, "等待采集");
   }
 
@@ -364,6 +357,13 @@ export class TaskManager {
   }
 
   async #requeue(task, stage, schedule = true) {
+    const block = this.platformBlocks.get(task.platform);
+    if (block) {
+      this.#applyBlock(task, block);
+      task.updatedAt = this.now().toISOString();
+      await this.store.save(task);
+      return clone(task);
+    }
     task.status = TASK_STATUS.QUEUED;
     task.error = null;
     task.blockReason = null;
