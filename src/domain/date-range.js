@@ -1,4 +1,4 @@
-const PRESET_MONTHS = { month: 1, halfYear: 6 };
+const PRESET_MONTHS = { month: 1, halfYear: 6, year: 12 };
 
 function startOfDay(value) {
   const date = new Date(value);

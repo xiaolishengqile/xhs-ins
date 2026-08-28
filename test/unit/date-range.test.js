@@ -19,6 +19,15 @@ test("最近一个月按日历月计算并处理月底", () => {
   assert.deepEqual([from.getFullYear(), from.getMonth(), from.getDate()], [2026, 1, 28]);
 });
 
+test("最近一年按十二个日历月计算并处理闰日", () => {
+  const result = resolveDateRange({ preset: "year" }, new Date(2024, 1, 29, 12));
+  const from = new Date(result.from);
+  const to = new Date(result.to);
+
+  assert.deepEqual([from.getFullYear(), from.getMonth(), from.getDate(), from.getHours()], [2023, 1, 28, 0]);
+  assert.deepEqual([to.getFullYear(), to.getMonth(), to.getDate(), to.getHours(), to.getMinutes()], [2024, 1, 29, 23, 59]);
+});
+
 test("自定义日期覆盖完整起止日", () => {
   const result = resolveDateRange({ preset: "custom", from: "2026-01-02", to: "2026-02-03" });
   const from = new Date(result.from);

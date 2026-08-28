@@ -68,6 +68,22 @@ test("手动提交只创建待开始任务，点击开始后才运行", async (t
   assert.equal(manager.list()[0].status, "running");
 });
 
+test("采集周期可以选择最近一年", async (t) => {
+  const { manager, page, url } = await fixture(t);
+  await page.goto(url);
+  await page.getByLabel("博主主页链接").fill("https://www.instagram.com/year_creator/");
+  await page.locator("#range-preset").selectOption("year");
+
+  await page.getByRole("button", { name: "加入待采集" }).click();
+
+  await page.locator('[data-status="pending"]').waitFor();
+  const task = manager.list()[0];
+  const from = new Date(task.from);
+  const to = new Date(task.to);
+  assert.deepEqual([from.getFullYear(), from.getMonth(), from.getDate()], [2025, 7, 28]);
+  assert.deepEqual([to.getFullYear(), to.getMonth(), to.getDate()], [2026, 7, 28]);
+});
+
 test("导入文档只填充链接预览，不会自动创建任务", async (t) => {
   const { manager, page, url } = await fixture(t);
   await page.goto(url);
