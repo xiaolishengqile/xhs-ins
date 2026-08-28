@@ -4,7 +4,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { createApp } from "../../src/app.js";
+import { createApp } from "../../src/http/app.js";
 import { startServer } from "../../src/http/server.js";
 import { TaskManager } from "../../src/tasks/task-manager.js";
 import { TaskStore } from "../../src/tasks/task-store.js";

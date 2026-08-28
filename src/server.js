@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { createApp } from "./app.js";
+import { createApp } from "./http/app.js";
 import { BrowserManager } from "./browser/browser-manager.js";
 import { createCollectorFactory } from "./collectors/collector-factory.js";
 import { InstagramCollector } from "./collectors/instagram/collector.js";
