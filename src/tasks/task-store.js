@@ -7,6 +7,7 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 export class TaskStore {
   constructor(rootDir) {
     this.rootDir = path.resolve(rootDir);
+    this.saveQueues = new Map();
   }
 
   taskDir(id) {
@@ -15,12 +16,23 @@ export class TaskStore {
   }
 
   async save(task) {
-    const directory = this.taskDir(task.id);
-    await mkdir(directory, { recursive: true });
-    const destination = path.join(directory, "task.json");
-    const temporary = path.join(directory, `.task-${process.pid}-${randomUUID()}.tmp`);
-    await writeFile(temporary, `${JSON.stringify(task, null, 2)}\n`, "utf8");
-    await rename(temporary, destination);
+    const id = task.id;
+    const content = `${JSON.stringify(task, null, 2)}\n`;
+    const previous = this.saveQueues.get(id) ?? Promise.resolve();
+    const saving = previous.catch(() => {}).then(async () => {
+      const directory = this.taskDir(id);
+      await mkdir(directory, { recursive: true });
+      const destination = path.join(directory, "task.json");
+      const temporary = path.join(directory, `.task-${process.pid}-${randomUUID()}.tmp`);
+      await writeFile(temporary, content, "utf8");
+      await rename(temporary, destination);
+    });
+    this.saveQueues.set(id, saving);
+    try {
+      await saving;
+    } finally {
+      if (this.saveQueues.get(id) === saving) this.saveQueues.delete(id);
+    }
   }
 
   async loadAll() {
@@ -40,6 +52,7 @@ export class TaskStore {
   }
 
   async remove(id) {
+    await this.saveQueues.get(id)?.catch(() => {});
     await rm(this.taskDir(id), { recursive: true, force: true });
   }
 }

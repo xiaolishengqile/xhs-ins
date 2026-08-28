@@ -25,3 +25,18 @@ test("任务目录拒绝路径穿越", async (t) => {
 
   assert.throws(() => store.taskDir("../../outside"), /任务编号/);
 });
+
+test("同一任务的并发状态保存会按调用顺序串行完成", async (t) => {
+  const rootDir = await mkdtemp(path.join(tmpdir(), "collector-store-"));
+  t.after(() => rm(rootDir, { recursive: true, force: true }));
+  const store = new TaskStore(rootDir);
+  const id = "123e4567-e89b-12d3-a456-426614174000";
+
+  await Promise.all(Array.from({ length: 40 }, (_value, revision) => store.save({
+    id,
+    status: "running",
+    revision,
+  })));
+
+  assert.equal((await store.loadAll())[0].revision, 39);
+});

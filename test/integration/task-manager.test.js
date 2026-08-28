@@ -195,3 +195,86 @@ test("导出阶段可以更新图片下载进度", async (t) => {
   await eventually(() => assert.equal(manager.get(created.id).status, "completed"));
   assert.equal(manager.get(created.id).progress.imagesDownloaded, 2);
 });
+
+test("任务页面在媒体导出和归档完成后才关闭", async (t) => {
+  const events = [];
+  const browserSession = {
+    close: async () => events.push("close"),
+    fetchBuffer: async () => {
+      events.push("fetch");
+      return Buffer.from("image");
+    },
+  };
+  const manager = await managerFixture(
+    t,
+    async () => {
+      events.push("collect");
+      return { author: "测试博主", notes: [] };
+    },
+    {
+      taskSessionFactory: async () => browserSession,
+      exporter: async (_task, _notes, taskDir, { browserSession: activeSession }) => {
+        await activeSession.fetchBuffer("https://example.com/image.jpg");
+        events.push("archive");
+        return path.join(taskDir, "result.zip");
+      },
+    },
+  );
+  const created = await manager.create(input(0));
+
+  await eventually(() => assert.equal(manager.get(created.id).status, "completed"));
+
+  assert.deepEqual(events, ["collect", "fetch", "archive", "close"]);
+});
+
+test("失败和取消任务会完整关闭浏览器会话", async (t) => {
+  const closeOptions = [];
+  let sessionCreations = 0;
+  const browserSession = { close: async (options) => closeOptions.push(options) };
+  const manager = await managerFixture(
+    t,
+    async (task, { signal }) => {
+      if (task.profileKey === "user0") throw new Error("页面失败");
+      await new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(new DOMException("已取消", "AbortError")), { once: true });
+      });
+    },
+    {
+      taskSessionFactory: async () => {
+        sessionCreations += 1;
+        return browserSession;
+      },
+    },
+  );
+  const failed = await manager.create(input(0));
+  await eventually(() => assert.equal(manager.get(failed.id).status, "failed"));
+  const cancelled = await manager.create(input(1));
+  await eventually(() => assert.equal(manager.get(cancelled.id).status, "running"));
+  await eventually(() => assert.equal(sessionCreations, 2));
+  await manager.cancel(cancelled.id);
+  await eventually(() => assert.equal(manager.get(cancelled.id).status, "cancelled"));
+  await eventually(() => assert.equal(closeOptions.length, 2));
+
+  assert.deepEqual(closeOptions, [
+    { preserveHumanAction: false },
+    { preserveHumanAction: false },
+  ]);
+});
+
+test("等待人工处理任务只保留验证页面", async (t) => {
+  const closeOptions = [];
+  const manager = await managerFixture(
+    t,
+    async () => { throw new LoginRequiredError(); },
+    {
+      taskSessionFactory: async () => ({
+        close: async (options) => closeOptions.push(options),
+      }),
+    },
+  );
+  const created = await manager.create(input(0));
+
+  await eventually(() => assert.equal(manager.get(created.id).status, "waiting_user"));
+
+  assert.deepEqual(closeOptions, [{ preserveHumanAction: true }]);
+});

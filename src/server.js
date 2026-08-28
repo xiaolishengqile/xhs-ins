@@ -29,11 +29,12 @@ export async function createRuntime({ dataDir = defaultDataDir() } = {}) {
   const manager = new TaskManager({
     store,
     collectorFactory,
-    exporter: async (task, notes, taskDir, { signal, onProgress }) => {
+    taskSessionFactory: (task) => browserManager.createTaskSession(task.platform, task.id),
+    exporter: async (task, notes, taskDir, { signal, onProgress, browserSession }) => {
       const downloaded = await downloadMedia(
         notes,
         taskDir,
-        (url) => browserManager.fetchBuffer(task.platform, url),
+        (url) => browserSession.fetchBuffer(url),
         (progress) => onProgress({ ...progress, stage: "下载图片" }),
         signal,
       );

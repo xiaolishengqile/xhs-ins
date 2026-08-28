@@ -17,6 +17,7 @@ export class TaskManager {
     store,
     collectorFactory,
     exporter,
+    taskSessionFactory = async () => null,
     maxConcurrency = 5,
     now = () => new Date(),
     idFactory = randomUUID,
@@ -24,6 +25,7 @@ export class TaskManager {
     this.store = store;
     this.collectorFactory = collectorFactory;
     this.exporter = exporter;
+    this.taskSessionFactory = taskSessionFactory;
     this.maxConcurrency = maxConcurrency;
     this.now = now;
     this.idFactory = idFactory;
@@ -173,6 +175,8 @@ export class TaskManager {
 
   async #run(task) {
     const controller = new AbortController();
+    let browserSession = null;
+    let preserveHumanAction = false;
     this.running.set(task.id, controller);
     task.status = TASK_STATUS.RUNNING;
     task.error = null;
@@ -183,13 +187,15 @@ export class TaskManager {
 
     try {
       if (controller.signal.aborted) throw new DOMException("已取消", "AbortError");
+      browserSession = await this.taskSessionFactory(clone(task));
+      if (controller.signal.aborted) throw new DOMException("已取消", "AbortError");
       const onProgress = async (progress) => {
         if (controller.signal.aborted) return;
         task.progress = { ...task.progress, ...progress };
         task.updatedAt = this.now().toISOString();
         await this.store.save(task);
       };
-      const collector = this.collectorFactory(task.platform);
+      const collector = this.collectorFactory(task.platform, browserSession ?? undefined);
       const result = await collector.collect(clone(task), {
         signal: controller.signal,
         onProgress,
@@ -199,6 +205,7 @@ export class TaskManager {
       task.resultPath = await this.exporter(task, result.notes ?? [], this.store.taskDir(task.id), {
         signal: controller.signal,
         onProgress,
+        browserSession,
       });
       task.status = TASK_STATUS.COMPLETED;
       task.progress.stage = "采集完成";
@@ -209,6 +216,7 @@ export class TaskManager {
         task.error = null;
         task.progress.stage = "已取消";
       } else if (error?.code === "HUMAN_ACTION_REQUIRED") {
+        preserveHumanAction = true;
         task.status = TASK_STATUS.WAITING_USER;
         task.error = errorMessage(error);
         task.progress.stage = "等待人工登录或验证";
@@ -218,6 +226,7 @@ export class TaskManager {
         task.progress.stage = "采集失败";
       }
     } finally {
+      await browserSession?.close({ preserveHumanAction }).catch(() => {});
       task.updatedAt = this.now().toISOString();
       this.running.delete(task.id);
       await this.store.save(task);
