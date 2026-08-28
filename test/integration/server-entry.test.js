@@ -32,5 +32,7 @@ test("云平台可以通过默认导出处理网页请求", async (t) => {
   assert.match(port, /^\d+$/);
   const response = await fetch(`http://127.0.0.1:${port}/`);
   assert.equal(response.status, 200);
-  assert.match(await response.text(), /公开博主图片采集/);
+  const html = await response.text();
+  assert.doesNotMatch(html, /<h1>公开博主图片采集<\/h1>/);
+  assert.match(html, /先整理任务，再按需开始/);
 });
