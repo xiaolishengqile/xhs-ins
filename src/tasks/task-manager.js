@@ -167,19 +167,23 @@ export class TaskManager {
 
     try {
       if (controller.signal.aborted) throw new DOMException("已取消", "AbortError");
+      const onProgress = async (progress) => {
+        if (controller.signal.aborted) return;
+        task.progress = { ...task.progress, ...progress };
+        task.updatedAt = this.now().toISOString();
+        await this.store.save(task);
+      };
       const collector = this.collectorFactory(task.platform);
       const result = await collector.collect(clone(task), {
         signal: controller.signal,
-        onProgress: async (progress) => {
-          if (controller.signal.aborted) return;
-          task.progress = { ...task.progress, ...progress };
-          task.updatedAt = this.now().toISOString();
-          await this.store.save(task);
-        },
+        onProgress,
       });
       if (controller.signal.aborted) return;
       task.author = result.author ?? task.profileKey;
-      task.resultPath = await this.exporter(task, result.notes ?? [], this.store.taskDir(task.id));
+      task.resultPath = await this.exporter(task, result.notes ?? [], this.store.taskDir(task.id), {
+        signal: controller.signal,
+        onProgress,
+      });
       task.status = TASK_STATUS.COMPLETED;
       task.progress.stage = "采集完成";
       task.completedAt = this.now().toISOString();

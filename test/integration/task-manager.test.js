@@ -146,3 +146,21 @@ test("等待人工登录的任务会释放并发名额", async (t) => {
   await eventually(() => assert.equal(manager.get(waiting.id).status, "waiting_user"));
   await eventually(() => assert.equal(manager.get(next.id).status, "completed"));
 });
+
+test("导出阶段可以更新图片下载进度", async (t) => {
+  const manager = await managerFixture(
+    t,
+    async () => ({ author: "测试博主", notes: [{ id: "n1" }] }),
+    {
+      exporter: async (_task, _notes, taskDir, { onProgress, signal }) => {
+        assert.equal(signal.aborted, false);
+        await onProgress({ stage: "下载图片", imagesDownloaded: 2 });
+        return path.join(taskDir, "result.zip");
+      },
+    },
+  );
+  const created = await manager.create(input(0));
+
+  await eventually(() => assert.equal(manager.get(created.id).status, "completed"));
+  assert.equal(manager.get(created.id).progress.imagesDownloaded, 2);
+});
