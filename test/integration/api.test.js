@@ -288,6 +288,7 @@ test("控制接口可以幂等暂停和继续调度器", async (t) => {
   assert.equal(initial.response.status, 200);
   assert.deepEqual(initial.body, {
     paused: false,
+    storageError: null,
     maxConcurrency: 1,
     running: 0,
     queued: 0,

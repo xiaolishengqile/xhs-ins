@@ -71,6 +71,7 @@ export class TaskManager {
     this.taskInterruptions = new Map();
     this.platformBlocks = new Map();
     this.paused = false;
+    this.storageError = null;
     this.closed = false;
     this.platformCooldowns = new PlatformCooldowns({
       store: this.controlStore,
@@ -96,7 +97,7 @@ export class TaskManager {
         task.blockReason = null;
         task.progress = { ...task.progress, stage: "等待恢复" };
       }
-      if (task.status !== previousStatus) await this.store.save(task);
+      if (task.status !== previousStatus) await this.#saveTask(task);
       if (task.status === TASK_STATUS.QUEUED) this.queue.push(task.id);
       if (task.status === TASK_STATUS.WAITING_USER) {
         task.blockReason = "login";
@@ -133,7 +134,7 @@ export class TaskManager {
       blockReason: null,
     };
     this.tasks.set(task.id, task);
-    await this.store.save(task);
+    await this.#saveTask(task);
     return clone(task);
   }
 
@@ -200,6 +201,7 @@ export class TaskManager {
     const tasks = [...this.tasks.values()];
     return {
       paused: this.paused,
+      storageError: this.storageError,
       maxConcurrency: this.maxConcurrency,
       running: tasks.filter((task) => task.status === TASK_STATUS.RUNNING).length,
       queued: tasks.filter((task) => task.status === TASK_STATUS.QUEUED).length,
@@ -235,7 +237,7 @@ export class TaskManager {
       task.status = TASK_STATUS.PAUSED;
       task.progress.stage = "已暂停";
       task.updatedAt = this.now().toISOString();
-      await this.store.save(task);
+      await this.#saveTask(task);
     }
     const runningPromises = [];
     for (const [id, controller] of this.running) {
@@ -250,7 +252,17 @@ export class TaskManager {
 
   async resumeAll() {
     if (this.closed) throw new Error("任务管理器已关闭");
-    if (!this.paused) return this.controlStatus();
+    const recoveringStorage = this.storageError !== null;
+    if (!this.paused && !recoveringStorage) return this.controlStatus();
+    if (recoveringStorage) {
+      await Promise.allSettled([...this.runningPromises]);
+      try {
+        for (const task of this.tasks.values()) await this.store.save(task);
+      } catch (error) {
+        this.#haltForStorage(error);
+        throw error;
+      }
+    }
     for (const task of this.tasks.values()) {
       if (task.status !== TASK_STATUS.PAUSED) continue;
       task.status = TASK_STATUS.QUEUED;
@@ -262,11 +274,19 @@ export class TaskManager {
       task.updatedAt = this.now().toISOString();
       task.startedAt = null;
       task.completedAt = null;
-      if (!this.queue.includes(task.id)) this.queue.push(task.id);
-      await this.store.save(task);
+      try {
+        await this.store.save(task);
+      } catch (error) {
+        this.#haltForStorage(error);
+        throw error;
+      }
     }
-    await this.platformCooldowns.save(false);
+    if (this.paused) await this.platformCooldowns.save(false);
+    for (const task of this.tasks.values()) {
+      if (task.status === TASK_STATUS.QUEUED && !this.queue.includes(task.id)) this.queue.push(task.id);
+    }
     this.paused = false;
+    this.storageError = null;
     this.#requestSchedule();
     return this.controlStatus();
   }
@@ -280,7 +300,7 @@ export class TaskManager {
     task.updatedAt = this.now().toISOString();
     const runningPromise = this.taskRuns.get(id);
     this.running.get(id)?.abort();
-    await this.store.save(task);
+    await this.#saveTask(task);
     if (runningPromise) await Promise.allSettled([runningPromise]);
     this.#requestSchedule();
     return clone(task);
@@ -320,7 +340,7 @@ export class TaskManager {
   }
 
   async resumePlatform(platform) {
-    if (this.paused) throw new Error("调度器已暂停，请先继续调度");
+    this.#assertSchedulingAvailable();
     this.platformBlocks.delete(platform);
     const tasks = [...this.tasks.values()].filter(
       (task) => task.platform === platform && task.status === TASK_STATUS.WAITING_USER,
@@ -330,7 +350,7 @@ export class TaskManager {
   }
 
   async recoverPlatform(platform) {
-    if (this.paused) throw new Error("调度器已暂停，请先继续调度");
+    this.#assertSchedulingAvailable();
     if (this.platformBlocks.get(platform)?.reason !== "browser") {
       throw new Error("该平台没有浏览器运行环境故障");
     }
@@ -378,11 +398,12 @@ export class TaskManager {
   }
 
   async #requeue(task, stage, schedule = true) {
+    this.#assertSchedulingAvailable();
     const block = this.platformBlocks.get(task.platform);
     if (block) {
       this.#applyBlock(task, block);
       task.updatedAt = this.now().toISOString();
-      await this.store.save(task);
+      await this.#saveTask(task);
       return clone(task);
     }
     task.status = TASK_STATUS.QUEUED;
@@ -393,7 +414,7 @@ export class TaskManager {
     task.warningCount = 0;
     task.updatedAt = this.now().toISOString();
     this.queue.push(task.id);
-    await this.store.save(task);
+    await this.#saveTask(task);
     if (schedule) this.#requestSchedule();
     return clone(task);
   }
@@ -403,7 +424,7 @@ export class TaskManager {
   }
 
   #schedule() {
-    if (this.closed || this.paused) return;
+    if (this.closed || this.paused || this.storageError) return;
     this.platformCooldowns.refresh();
     while (this.running.size < this.maxConcurrency && this.queue.length > 0) {
       const runnableIndex = this.queue.findIndex((id) => {
@@ -422,10 +443,11 @@ export class TaskManager {
       const promise = this.#run(task);
       this.runningPromises.add(promise);
       this.taskRuns.set(id, promise);
-      promise.finally(() => {
+      const cleanup = () => {
         this.runningPromises.delete(promise);
         if (this.taskRuns.get(id) === promise) this.taskRuns.delete(id);
-      });
+      };
+      promise.then(cleanup, cleanup);
     }
   }
 
@@ -447,15 +469,15 @@ export class TaskManager {
     task.startedAt = task.startedAt ?? this.now().toISOString();
     task.updatedAt = this.now().toISOString();
     task.progress.stage = "正在采集";
-    await this.store.save(task);
     const onProgress = async (progress) => {
       if (controller.signal.aborted) return;
       task.progress = { ...task.progress, ...progress };
       task.updatedAt = this.now().toISOString();
-      await this.store.save(task);
+      await this.#saveTask(task);
     };
 
     try {
+      await this.#saveTask(task);
       throwIfAborted(controller.signal);
       browserSession = await this.taskSessionFactory(clone(task));
       throwIfAborted(controller.signal);
@@ -465,7 +487,7 @@ export class TaskManager {
         await checkpoint.extend(task.from, task.to);
         saved = await checkpoint.load();
         task.refreshRequested = false;
-        await this.store.save(task);
+        await this.#saveTask(task);
       }
       throwIfAborted(controller.signal);
       const result = saved.result ?? await collector.collect(clone(task), {
@@ -551,8 +573,10 @@ export class TaskManager {
       this.taskInterruptions.delete(task.id);
       task.updatedAt = this.now().toISOString();
       this.running.delete(task.id);
-      await this.store.save(task);
-      this.#requestSchedule();
+      try {
+        await this.#saveTask(task);
+      } catch { /* 故障已进入 controlStatus，等待用户明确继续。 */ }
+      if (!this.storageError) this.#requestSchedule();
     }
   }
 
@@ -605,7 +629,7 @@ export class TaskManager {
         this.queue = this.queue.filter((id) => id !== task.id);
         this.#applyBlock(task, block);
         task.updatedAt = this.now().toISOString();
-        await this.store.save(task);
+        await this.#saveTask(task);
       } else if (task.status === TASK_STATUS.RUNNING) {
         this.taskInterruptions.set(task.id, block);
         this.running.get(task.id)?.abort();
@@ -614,5 +638,33 @@ export class TaskManager {
       }
     }
     await Promise.allSettled(runningPromises);
+  }
+
+  #assertSchedulingAvailable() {
+    if (this.storageError) throw new Error(`存储故障，请确认磁盘可写后继续：${this.storageError}`);
+    if (this.paused) throw new Error("调度器已暂停，请先继续调度");
+  }
+
+  async #saveTask(task) {
+    try {
+      await this.store.save(task);
+    } catch (error) {
+      this.#haltForStorage(error);
+      throw error;
+    }
+  }
+
+  #haltForStorage(error) {
+    this.storageError = errorMessage(error);
+    const interruption = {
+      reason: "storage",
+      message: this.storageError,
+      status: TASK_STATUS.PAUSED,
+      stage: "存储故障，已暂停",
+    };
+    for (const [id, controller] of this.running) {
+      this.taskInterruptions.set(id, interruption);
+      controller.abort();
+    }
   }
 }

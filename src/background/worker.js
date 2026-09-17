@@ -1,5 +1,6 @@
 import { chmod, rm } from "node:fs/promises";
 import os from "node:os";
+import path from "node:path";
 import { parseArgs } from "node:util";
 
 import { createApp } from "../http/app.js";
@@ -114,6 +115,8 @@ export async function runWorker(argv = process.argv.slice(2)) {
       pid: process.pid,
       url: web.url,
       startedAt: new Date().toISOString(),
+      dataDir: path.resolve(options.dataDir),
+      outputDir: runtime.controller.outputDir,
     };
     const status = () => ({ ...baseStatus, paused: runtime.manager.controlStatus().paused, stopping });
     control = await startControlServer({

@@ -45,6 +45,7 @@ let currentPage = 0;
 const PAGE_SIZE = 30;
 let refreshPromise = null;
 let refreshAgain = false;
+let lastRefreshAt = 0;
 let hasActiveTasks = false;
 let controlBusy = false;
 let bulkBusy = false;
@@ -97,6 +98,9 @@ function actionButton(task, action, label) {
   button.type = "button";
   button.dataset.action = action;
   button.dataset.id = task.id;
+  if (currentControl.storageError && ["start", "retry", "update", "resume", "recover"].includes(action)) {
+    button.disabled = true;
+  }
   return button;
 }
 
@@ -172,7 +176,7 @@ function updateBulkActions() {
   elements.selectAll.indeterminate = selected.length > 0 && selected.length < currentTasks.length;
   elements.selectionCount.textContent = `已选 ${selected.length} 项`;
   elements.startSelected.textContent = `开始选中（${pendingCount}）`;
-  elements.startSelected.disabled = bulkBusy || currentControl.paused || pendingCount === 0;
+  elements.startSelected.disabled = bulkBusy || currentControl.paused || Boolean(currentControl.storageError) || pendingCount === 0;
   elements.deleteSelected.textContent = `删除选中（${selected.length}）`;
   elements.deleteSelected.disabled = bulkBusy || selected.length === 0;
 }
@@ -190,7 +194,9 @@ function render(tasks, control = currentControl) {
   document.querySelector('[data-testid="running-summary"]').textContent = `${running} / ${control.maxConcurrency ?? 1}`;
   const coolingPlatforms = Object.keys(control.cooldowns ?? {});
   const browserBlocked = (control.platformBlocks ?? []).some((block) => block.reason === "browser");
-  const schedulerText = control.paused
+  const schedulerText = control.storageError
+    ? `存储故障：${control.storageError}`
+    : control.paused
     ? "队列已暂停"
     : browserBlocked
       ? "浏览器运行环境受阻"
@@ -200,8 +206,8 @@ function render(tasks, control = currentControl) {
         ? "部分平台冷却中"
         : "正常调度";
   elements.schedulerStatus.textContent = schedulerText;
-  elements.schedulerStatus.classList.toggle("is-paused", control.paused || browserBlocked || coolingPlatforms.length > 0);
-  elements.pauseAll.textContent = control.paused ? "继续全部" : "暂停全部";
+  elements.schedulerStatus.classList.toggle("is-paused", Boolean(control.storageError) || control.paused || browserBlocked || coolingPlatforms.length > 0);
+  elements.pauseAll.textContent = control.storageError ? "重试保存并继续" : control.paused ? "继续全部" : "暂停全部";
   elements.pauseAll.disabled = controlBusy;
   elements.emptyState.hidden = tasks.length > 0;
   const pages = Math.max(1, Math.ceil(tasks.length / PAGE_SIZE));
@@ -228,6 +234,7 @@ function refresh() {
     refreshAgain = true;
     return refreshPromise;
   }
+  lastRefreshAt = Date.now();
   refreshPromise = (async () => {
     do {
       refreshAgain = false;
@@ -351,7 +358,7 @@ elements.pauseAll.addEventListener("click", async () => {
   if (controlBusy) return;
   controlBusy = true;
   try {
-    const action = currentControl.paused ? "resume" : "pause";
+    const action = currentControl.paused || currentControl.storageError ? "resume" : "pause";
     currentControl = await request(`/api/control/${action}`, { method: "POST" });
     elements.message.textContent = currentControl.paused
       ? "已暂停所有运行和排队任务，应用浏览器已关闭。"
@@ -457,5 +464,7 @@ elements.deleteSelected.addEventListener("click", async () => {
 
 await refresh();
 setInterval(() => {
-  if (document.visibilityState === "visible" && hasActiveTasks && !refreshPromise) refresh();
+  if (document.visibilityState !== "visible" || refreshPromise) return;
+  const interval = hasActiveTasks ? 3_000 : 15_000;
+  if (Date.now() - lastRefreshAt >= interval) refresh();
 }, 3_000);

@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import { createServer } from "node:http";
 import net from "node:net";
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
@@ -60,7 +60,7 @@ async function sendControl(endpoint, payload) {
 }
 
 test("后台进程就绪后可查询，重复启动复用实例，并能经过控制通道停止", async (t) => {
-  const { common } = await fixture(t);
+  const { dataDir, outputDir, common } = await fixture(t);
 
   const started = parse((await run(["start", ...common, "--port", "0"], { reject: true })).stdout);
   assert.equal(started.running, true);
@@ -74,6 +74,8 @@ test("后台进程就绪后可查询，重复启动复用实例，并能经过�
   const status = parse((await run(["status", ...common], { reject: true })).stdout);
   assert.equal(status.pid, started.pid);
   assert.equal(status.url, started.url);
+  assert.equal(status.dataDir, path.resolve(dataDir));
+  assert.equal(status.outputDir, path.resolve(outputDir));
 
   const paused = parse((await run(["pause", ...common], { reject: true })).stdout);
   assert.equal(paused.paused, true);
@@ -89,6 +91,16 @@ test("后台进程就绪后可查询，重复启动复用实例，并能经过�
   const restarted = parse((await run(["start", ...common, "--port", "0"], { reject: true })).stdout);
   assert.notEqual(restarted.pid, started.pid);
   assert.equal(parse((await run(["stop", ...common], { reject: true })).stdout).stopped, true);
+});
+
+test("后台状态返回临时数据目录和与运行时一致的默认图片目录", async (t) => {
+  const { dataDir } = await fixture(t);
+  const common = ["--data-dir", dataDir];
+
+  const status = parse((await run(["start", ...common, "--port", "0"], { reject: true })).stdout);
+
+  assert.equal(status.dataDir, path.resolve(dataDir));
+  assert.equal(status.outputDir, path.join(homedir(), "Pictures", "博主图片采集"));
 });
 
 test("控制通道拒绝错误实例凭证且不会停止后台", async (t) => {

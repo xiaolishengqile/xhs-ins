@@ -230,6 +230,81 @@ test("没有运行任务时不会持续轮询任务列表", async (t) => {
   assert.equal(listRequests, 1);
 });
 
+test("空闲可见页面每十五秒检查外部状态", async (t) => {
+  const { manager, page, url } = await fixture(t);
+  await page.clock.install();
+  let controlRequests = 0;
+  page.on("request", (request) => {
+    if (request.method() === "GET" && request.url().endsWith("/api/control")) controlRequests += 1;
+  });
+  await page.goto(url);
+  assert.equal(controlRequests, 1);
+
+  await manager.pauseAll();
+  await page.clock.fastForward(12_000);
+  assert.equal(controlRequests, 1);
+  await page.clock.fastForward(3_000);
+
+  await page.getByText("队列已暂停", { exact: true }).waitFor();
+  assert.equal(controlRequests, 2);
+});
+
+test("活动页面每三秒刷新，隐藏后停止轮询", async (t) => {
+  const { manager, page, url } = await fixture(
+    t,
+    (_task, { signal }) => new Promise((_resolve, reject) => {
+      signal.addEventListener("abort", () => reject(new DOMException("已取消", "AbortError")), { once: true });
+    }),
+  );
+  const created = await manager.create({
+    url: "https://www.instagram.com/polling_creator/",
+    range: { preset: "week" },
+  });
+  await manager.start(created.id);
+  await eventually(() => assert.equal(manager.get(created.id).status, "running"));
+  await page.clock.install();
+  let controlRequests = 0;
+  page.on("request", (request) => {
+    if (request.method() === "GET" && request.url().endsWith("/api/control")) controlRequests += 1;
+  });
+  await page.goto(url);
+
+  await page.clock.fastForward(3_000);
+  assert.equal(controlRequests, 2);
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await page.clock.fastForward(30_000);
+
+  assert.equal(controlRequests, 2);
+});
+
+test("页面明确显示存储故障并提供手动恢复入口", async (t) => {
+  const { page, url } = await fixture(t);
+  await page.route("**/api/control", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({
+      paused: false,
+      storageError: "模拟磁盘空间不足",
+      maxConcurrency: 1,
+      running: 0,
+      queued: 0,
+      pausedTasks: 0,
+      pending: 0,
+      blockedPlatforms: [],
+      platformBlocks: [],
+      cooldowns: {},
+    }),
+  }));
+
+  await page.goto(url);
+
+  await page.getByText("存储故障：模拟磁盘空间不足", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "重试保存并继续" }).waitFor();
+});
+
 test("任务卡片会提示跳过帖子和低分辨率预览图", async (t) => {
   const { manager, page, url } = await fixture(
     t,
