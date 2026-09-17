@@ -3,7 +3,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QIcon, QPixmap
-from PySide6.QtWidgets import (QComboBox, QHBoxLayout, QLabel, QListView,
+from PySide6.QtWidgets import (QComboBox, QGroupBox, QHBoxLayout, QLabel, QListView,
                               QListWidget, QListWidgetItem, QPushButton, QVBoxLayout, QWidget)
 
 from .image_files import decode_image, scan_accounts, scan_images
@@ -20,31 +20,38 @@ class ImagesPage(QWidget):
         self.jobs = Jobs(self)
         self.viewer = None
         layout = QVBoxLayout(self)
+        gallery = QGroupBox("本地图片")
+        gallery.setObjectName("localImages")
+        gallery_layout = QVBoxLayout(gallery)
         bar = QHBoxLayout()
         self.accounts = QComboBox()
         self.accounts.setMinimumWidth(220)
         self.refresh_button = QPushButton("刷新本地图片")
+        self.refresh_button.setProperty("role", "secondary")
         bar.addWidget(QLabel("账号"))
         bar.addWidget(self.accounts)
         bar.addWidget(self.refresh_button)
         bar.addStretch()
-        layout.addLayout(bar)
+        gallery_layout.addLayout(bar)
         self.message = QLabel("连接后台后浏览本地已保存的完整图片。双击图片打开预览。")
+        self.message.setProperty("kind", "hint")
         self.message.setWordWrap(True)
-        layout.addWidget(self.message)
+        gallery_layout.addWidget(self.message)
         self.list = QListWidget()
+        self.list.setObjectName("imageGallery")
         self.list.setViewMode(QListView.ViewMode.IconMode)
         self.list.setResizeMode(QListView.ResizeMode.Adjust)
         self.list.setIconSize(QSize(240, 180))
         self.list.setGridSize(QSize(265, 225))
         self.list.setWordWrap(True)
-        layout.addWidget(self.list)
+        gallery_layout.addWidget(self.list)
         pager = QHBoxLayout()
         self.previous, self.next = QPushButton("上一页"), QPushButton("下一页")
         self.page_label = QLabel()
         for widget in (self.previous, self.page_label, self.next):
             pager.addWidget(widget)
-        layout.addLayout(pager)
+        gallery_layout.addLayout(pager)
+        layout.addWidget(gallery)
         self.previous.clicked.connect(lambda: self.change_page(-1))
         self.next.clicked.connect(lambda: self.change_page(1))
         self.refresh_button.clicked.connect(self.refresh)

@@ -1,12 +1,13 @@
 from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import (QHBoxLayout, QLabel, QListWidget, QMainWindow,
+from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QListWidget, QMainWindow,
                               QMenu, QMessageBox, QStackedWidget, QStyle,
                               QSystemTrayIcon, QVBoxLayout, QWidget)
 
 from .images import ImagesPage
 from .preferences import PreferencesPage
 from .tasks import TasksPage
+from .theme import APP_STYLE
 
 
 class MainWindow(QMainWindow):
@@ -19,15 +20,34 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("采图台")
         self.resize(1240, 820)
         central = QWidget()
+        central.setObjectName("appShell")
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(12)
+        top = QFrame()
+        top.setObjectName("topBar")
+        top_layout = QHBoxLayout(top)
+        brand = QVBoxLayout()
+        title = QLabel("采图台")
+        title.setObjectName("brandTitle")
+        subtitle = QLabel("本地图片采集与任务管理")
+        subtitle.setObjectName("brandSubtitle")
+        brand.addWidget(title)
+        brand.addWidget(subtitle)
         self.connection = QLabel("正在连接本机后台…")
+        self.connection.setObjectName("connectionStatus")
         self.connection.setWordWrap(True)
-        layout.addWidget(self.connection)
+        top_layout.addLayout(brand)
+        top_layout.addStretch()
+        top_layout.addWidget(self.connection)
+        layout.addWidget(top)
         body = QHBoxLayout()
+        body.setSpacing(12)
         self.navigation = QListWidget()
+        self.navigation.setObjectName("sideNavigation")
         self.navigation.addItems(["任务", "图片", "设置"])
-        self.navigation.setFixedWidth(115)
+        self.navigation.setFixedWidth(170)
         body.addWidget(self.navigation)
         self.pages = QStackedWidget()
         self.tasks = TasksPage(backend, settings.preset)
@@ -37,6 +57,7 @@ class MainWindow(QMainWindow):
             self.pages.addWidget(page)
         body.addWidget(self.pages)
         layout.addLayout(body)
+        self.setStyleSheet(APP_STYLE)
         self.navigation.currentRowChanged.connect(self.pages.setCurrentIndex)
         self.navigation.setCurrentRow(0)
         self.preferences.saved.connect(self.apply_settings)

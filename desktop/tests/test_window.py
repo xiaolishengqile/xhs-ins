@@ -148,6 +148,28 @@ class WindowTest(unittest.TestCase):
                 window.deleteLater()
                 APP.processEvents()
 
+    def test_visual_hierarchy_marks_primary_and_dangerous_actions(self):
+        from PySide6.QtWidgets import QGroupBox
+        _, MainWindow = self.classes()
+        with tempfile.TemporaryDirectory() as directory:
+            backend = BackendClient(directory)
+            window = MainWindow(backend, Settings(), Path(directory) / "desktop-settings.json")
+            try:
+                self.assertEqual(window.navigation.objectName(), "sideNavigation")
+                self.assertEqual(window.connection.objectName(), "connectionStatus")
+                self.assertEqual(window.tasks.create_form.submit.property("role"), "primary")
+                self.assertEqual(window.tasks.start_selected.property("role"), "primary")
+                self.assertEqual(window.tasks.delete_selected.property("role"), "danger")
+                self.assertEqual(window.preferences.save_button.property("role"), "primary")
+                self.assertEqual(window.images.refresh_button.property("role"), "secondary")
+                self.assertIsNotNone(window.tasks.findChild(QGroupBox, "taskManager"))
+                self.assertIsNotNone(window.preferences.findChild(QGroupBox, "maintenanceTools"))
+                self.assertIn('QPushButton[role="primary"]', window.styleSheet())
+            finally:
+                window.request_exit(False)
+                window.deleteLater()
+                APP.processEvents()
+
     def test_status_timer_does_not_poll_hidden_task_page(self):
         _, MainWindow = self.classes()
         server = LocalServer(lambda m, p, b: (200, {"tasks": []} if p == "/api/tasks" else {"paused": False}))

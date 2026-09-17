@@ -1,6 +1,6 @@
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QHBoxLayout, QHeaderView,
-                              QLabel, QMessageBox, QPushButton, QTableWidget,
+from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QGroupBox, QHBoxLayout,
+                              QHeaderView, QLabel, QMessageBox, QPushButton, QTableWidget,
                               QTableWidgetItem, QVBoxLayout, QWidget)
 
 from .create_task import CreateTaskForm
@@ -26,7 +26,10 @@ class TasksPage(QWidget):
         self.preset = self.create_form.preset
         self.create_form.created.connect(self.refresh)
         layout.addWidget(self.create_form)
-        bar = QHBoxLayout()
+        manager = QGroupBox("任务列表")
+        manager.setObjectName("taskManager")
+        manager_layout = QVBoxLayout(manager)
+        selection_bar = QHBoxLayout()
         self.filter = QComboBox()
         self.filter.addItem("全部状态", "")
         for key, label in STATES.items():
@@ -38,28 +41,47 @@ class TasksPage(QWidget):
         self.delete_selected = QPushButton("删除勾选任务")
         self.pause = QPushButton("暂停全部")
         self.reload = QPushButton("刷新")
-        for widget in (self.filter, self.select_all, self.clear_selection, self.start_selected, self.delete_selected, self.pause, self.reload):
-            bar.addWidget(widget)
-        layout.addLayout(bar)
+        self.start_selected.setProperty("role", "primary")
+        self.delete_selected.setProperty("role", "danger")
+        self.reload.setProperty("role", "secondary")
+        selection_bar.addWidget(QLabel("筛选与勾选"))
+        for widget in (self.filter, self.select_all, self.clear_selection):
+            selection_bar.addWidget(widget)
+        selection_bar.addStretch()
+        manager_layout.addLayout(selection_bar)
+        action_bar = QHBoxLayout()
+        action_bar.addWidget(QLabel("批量操作"))
+        for widget in (self.start_selected, self.pause, self.reload):
+            action_bar.addWidget(widget)
+        action_bar.addStretch()
+        action_bar.addWidget(self.delete_selected)
+        manager_layout.addLayout(action_bar)
         self.control_label = QLabel()
         self.control_label.setWordWrap(True)
+        self.control_label.setProperty("kind", "message")
         self.message = QLabel()
         self.message.setWordWrap(True)
-        layout.addWidget(self.control_label)
-        layout.addWidget(self.message)
+        self.message.setProperty("kind", "message")
+        manager_layout.addWidget(self.control_label)
+        manager_layout.addWidget(self.message)
         self.table = QTableWidget(0, 6)
+        self.table.setObjectName("taskTable")
         self.table.setHorizontalHeaderLabels(["勾选", "账号", "状态", "已保存 / 失败", "进度与提示", "操作"])
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
         self.table.itemChanged.connect(self.checked)
-        layout.addWidget(self.table)
+        manager_layout.addWidget(self.table)
         pager = QHBoxLayout()
         self.previous_page, self.next_page = QPushButton("上一页"), QPushButton("下一页")
         self.page_label = QLabel()
         for widget in (self.previous_page, self.page_label, self.next_page):
             pager.addWidget(widget)
-        layout.addLayout(pager)
+        pager.addStretch()
+        manager_layout.addLayout(pager)
+        layout.addWidget(manager, 1)
         self.previous_page.clicked.connect(lambda: self.change_page(-1))
         self.next_page.clicked.connect(lambda: self.change_page(1))
         self.select_all.clicked.connect(self.check_all)
@@ -204,6 +226,10 @@ class TasksPage(QWidget):
             actions.setContentsMargins(2, 2, 2, 2)
             for label, action in self.actions_for(row):
                 button = QPushButton(label)
+                if action == "delete":
+                    button.setProperty("role", "danger")
+                elif action in ("start", "login", "resume", "recover"):
+                    button.setProperty("role", "primary")
                 button.setEnabled(not self.busy and not (self.control.get("storageError") and action in ("start", "retry", "update", "resume", "recover")))
                 button.clicked.connect(lambda checked=False, identity=row["id"], action=action: self.act(identity, action))
                 actions.addWidget(button)

@@ -2,8 +2,9 @@ from pathlib import Path
 from urllib.parse import quote
 
 from PySide6.QtCore import QDate, Signal
-from PySide6.QtWidgets import (QComboBox, QDateEdit, QFileDialog, QHBoxLayout,
-                              QLabel, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QComboBox, QDateEdit, QFileDialog, QGroupBox,
+                              QHBoxLayout, QLabel, QPlainTextEdit, QPushButton,
+                              QSizePolicy, QVBoxLayout)
 
 from .jobs import Jobs
 from .settings import PRESETS
@@ -20,24 +21,31 @@ def read_import(path):
     return data
 
 
-class CreateTaskForm(QWidget):
+class CreateTaskForm(QGroupBox):
     created = Signal()
 
     def __init__(self, backend, preset="year", parent=None):
         super().__init__(parent)
+        self.setTitle("新建采集任务")
+        self.setObjectName("createTask")
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         self.backend = backend
         self.jobs = Jobs(self)
         self.builtin_text = None
         self.busy = False
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
         self.urls = QPlainTextEdit()
         self.urls.setPlaceholderText("每行一个博主主页链接，创建后进入待开始；手动输入及文件导入最多 500 个")
-        self.urls.setMaximumHeight(105)
+        self.urls.setMaximumHeight(92)
         layout.addWidget(self.urls)
-        bar = QHBoxLayout()
+        source_bar = QHBoxLayout()
         self.import_button = QPushButton("导入文件")
         self.builtin = QPushButton("加载内置名单（719）")
+        source_bar.addWidget(self.import_button)
+        source_bar.addWidget(self.builtin)
+        source_bar.addStretch()
+        layout.addLayout(source_bar)
+        bar = QHBoxLayout()
         self.preset = QComboBox()
         for label, value in PRESETS + [("自定义日期", "custom")]:
             self.preset.addItem(label, value)
@@ -49,10 +57,16 @@ class CreateTaskForm(QWidget):
             field.setDisplayFormat("yyyy-MM-dd")
             field.hide()
         self.submit = QPushButton("加入待采集")
-        for widget in (self.import_button, self.builtin, self.preset, self.from_date, self.to_date, self.submit):
+        self.submit.setProperty("role", "primary")
+        self.submit.setMinimumWidth(150)
+        bar.addWidget(QLabel("采集周期"))
+        for widget in (self.preset, self.from_date, self.to_date):
             bar.addWidget(widget)
+        bar.addStretch()
+        bar.addWidget(self.submit)
         layout.addLayout(bar)
         self.message = QLabel("创建任务不会自动开始。登录和验证仅在明确点击后打开浏览器。")
+        self.message.setProperty("kind", "hint")
         self.message.setWordWrap(True)
         layout.addWidget(self.message)
         self.import_button.clicked.connect(self.choose_import)
