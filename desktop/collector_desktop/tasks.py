@@ -127,7 +127,7 @@ class TasksPage(QWidget):
         if cooldowns:
             text += " · 平台冷却中，后台将按保存的时间恢复"
         self.control_label.setText(text)
-        self.pause.setText("继续全部" if paused else "暂停全部")
+        self.pause.setText("重试保存并继续" if storage else "继续全部" if paused else "暂停全部")
         self.start_selected.setEnabled(not self.busy and not storage)
         self.render()
 
@@ -238,7 +238,7 @@ class TasksPage(QWidget):
             self.operation("POST", "/api/tasks/start-batch", {"ids": list(self.selected)})
 
     def toggle_pause(self):
-        self.operation("POST", "/api/control/" + ("resume" if self.control.get("paused") else "pause"))
+        self.operation("POST", "/api/control/" + ("resume" if self.control.get("paused") or self.control.get("storageError") else "pause"))
 
     def act(self, identity, action):
         if action == "delete":

@@ -38,6 +38,13 @@ class BackendTest(unittest.TestCase):
         self.assertTrue(results[-1][1])
         client.close()
 
+    def test_old_backend_without_actual_output_directory_explains_upgrade(self):
+        BackendClient = self.backend_class()
+        client = BackendClient(Path(tempfile.gettempdir()) / "unused-desktop-test")
+        with self.assertRaisesRegex(ValueError, "旧后台.*安全停止.*新版"):
+            client.set_status({"url": "http://127.0.0.1:12345"})
+        client.close()
+
     def test_real_isolated_backend_lifecycle_and_pending_task(self):
         BackendClient = self.backend_class()
         root = Path(__file__).resolve().parents[2]

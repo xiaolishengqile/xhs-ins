@@ -55,6 +55,21 @@ async function fixture(
   return { manager, page, events, outputDir: path.join(rootDir, "output"), url: instance.url };
 }
 
+function controlSnapshot(storageError) {
+  return {
+    paused: false,
+    storageError,
+    maxConcurrency: 1,
+    running: 0,
+    queued: 0,
+    pausedTasks: 0,
+    pending: 1,
+    blockedPlatforms: [],
+    platformBlocks: [],
+    cooldowns: {},
+  };
+}
+
 test("手动提交只创建待开始任务，点击开始后才运行", async (t) => {
   const { manager, page, url } = await fixture(
     t,
@@ -303,6 +318,62 @@ test("页面明确显示存储故障并提供手动恢复入口", async (t) => {
 
   await page.getByText("存储故障：模拟磁盘空间不足", { exact: true }).waitFor();
   await page.getByRole("button", { name: "重试保存并继续" }).waitFor();
+});
+
+test("任务不变时存储故障出现会禁用任务启动按钮", async (t) => {
+  const { manager, page, url } = await fixture(t);
+  const created = await manager.create({
+    url: "https://www.instagram.com/storage_error_appears/",
+    range: { preset: "week" },
+  });
+  const unchangedTask = JSON.stringify(manager.get(created.id));
+  let storageError = null;
+  await page.route("**/api/control", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify(controlSnapshot(storageError)),
+  }));
+  await page.clock.install();
+  await page.goto(url);
+  const start = page.getByRole("button", { name: "开始", exact: true });
+  assert.equal(await start.isDisabled(), false);
+
+  storageError = "模拟磁盘空间不足";
+  const refreshed = page.waitForResponse((response) => response.url().endsWith("/api/control"));
+  await page.clock.fastForward(15_000);
+  await refreshed;
+  await page.getByText("存储故障：模拟磁盘空间不足", { exact: true }).waitFor();
+
+  assert.equal(await start.isDisabled(), true);
+  assert.equal(JSON.stringify(manager.get(created.id)), unchangedTask);
+});
+
+test("任务不变时存储故障解除会恢复任务启动按钮", async (t) => {
+  const { manager, page, url } = await fixture(t);
+  const created = await manager.create({
+    url: "https://www.instagram.com/storage_error_clears/",
+    range: { preset: "week" },
+  });
+  const unchangedTask = JSON.stringify(manager.get(created.id));
+  let storageError = "模拟磁盘空间不足";
+  await page.route("**/api/control", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify(controlSnapshot(storageError)),
+  }));
+  await page.clock.install();
+  await page.goto(url);
+  const start = page.getByRole("button", { name: "开始", exact: true });
+  assert.equal(await start.isDisabled(), true);
+
+  storageError = null;
+  const refreshed = page.waitForResponse((response) => response.url().endsWith("/api/control"));
+  await page.clock.fastForward(15_000);
+  await refreshed;
+  await page.getByText("正常调度", { exact: true }).waitFor();
+
+  assert.equal(await start.isDisabled(), false);
+  assert.equal(JSON.stringify(manager.get(created.id)), unchangedTask);
 });
 
 test("任务卡片会提示跳过帖子和低分辨率预览图", async (t) => {

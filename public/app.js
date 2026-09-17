@@ -219,7 +219,7 @@ function render(tasks, control = currentControl) {
   const visible = tasks.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE);
   const existing = new Map([...elements.taskList.children].map((card) => [card.dataset.taskId, card]));
   elements.taskList.replaceChildren(...visible.map((task) => {
-    const signature = JSON.stringify([task, selectedTaskIds.has(task.id)]);
+    const signature = JSON.stringify([task, selectedTaskIds.has(task.id), Boolean(control.storageError)]);
     const card = existing.get(task.id);
     if (card?.dataset.signature === signature) return card;
     const next = renderTask(task);

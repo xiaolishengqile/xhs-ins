@@ -42,7 +42,7 @@ class BackendClient(QObject):
         value = dict(value)
         value["url"] = validate_backend_url(value["url"])
         if not Path(value.get("outputDir", "")).is_absolute():
-            raise ValueError("后台未确认图片根目录")
+            raise ValueError("旧后台未返回实际图片目录；请先显式安全停止旧后台，再打开新版")
         self.status = value
         self.status_changed.emit(value)
 

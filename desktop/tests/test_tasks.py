@@ -103,6 +103,17 @@ class TasksTest(unittest.TestCase):
         self.page.show()
         self.assertTrue(self.page.timer.isActive())
 
+    def test_storage_error_recovery_button_always_resumes(self):
+        self.control.update(paused=False, storageError="模拟写盘失败")
+        self.page.refresh()
+        wait_for(lambda: self.page.control.get("storageError") and not self.page.refreshing)
+
+        self.assertEqual(self.page.pause.text(), "重试保存并继续")
+        QTest.mouseClick(self.page.pause, Qt.MouseButton.LeftButton)
+
+        wait_for(lambda: any(call[:2] == ("POST", "/api/control/resume") for call in self.server.calls))
+        self.assertFalse(any(call[:2] == ("POST", "/api/control/pause") for call in self.server.calls))
+
     def test_file_import_uses_backend_parser(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "profiles.txt"
