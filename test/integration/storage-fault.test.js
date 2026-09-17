@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -228,4 +228,147 @@ test("用户立即继续时先等待故障任务释放运行资源", async (t) =
   assert.equal(recoveredBeforeCleanup, false);
   assert.equal(manager.get(created.id).status, "completed");
   assert.equal(runs, 1);
+});
+
+test("真实断点重命名失败会冻结队列且恢复前重试断点写入", async (t) => {
+  const rootDir = await mkdtemp(path.join(tmpdir(), "collector-checkpoint-fault-"));
+  const { TaskManager } = await import(managerUrl);
+  const { TaskStore } = await import(storeUrl);
+  const store = new TaskStore(rootDir);
+  let releaseFirst;
+  const firstReady = new Promise((resolve) => { releaseFirst = resolve; });
+  const runs = new Map();
+  const manager = new TaskManager({
+    store,
+    maxConcurrency: 1,
+    collectorFactory: () => ({ collect: async (task) => {
+      const count = (runs.get(task.id) ?? 0) + 1;
+      runs.set(task.id, count);
+      if (task.profileKey === "checkpoint_first" && count === 1) {
+        await firstReady;
+        await mkdir(path.join(store.taskDir(task.id), "collection.json"));
+      }
+      return { author: task.profileKey, notes: [] };
+    } }),
+    exporter: async () => path.join(rootDir, "output"),
+  });
+  t.after(async () => {
+    releaseFirst();
+    await manager.shutdown();
+    await rm(rootDir, { recursive: true, force: true });
+  });
+  await manager.init();
+  const first = await manager.create({
+    url: "https://www.instagram.com/checkpoint_first/",
+    range: { preset: "week" },
+  });
+  const second = await manager.create({
+    url: "https://www.instagram.com/checkpoint_second/",
+    range: { preset: "week" },
+  });
+  await manager.start(first.id);
+  while (manager.get(first.id).status !== "running") {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  await manager.start(second.id);
+  releaseFirst();
+  const faultDeadline = Date.now() + 2_000;
+  while ((!manager.controlStatus().storageError || manager.controlStatus().running) && Date.now() < faultDeadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  assert.match(manager.controlStatus().storageError ?? "", /collection\.json|directory|目录|EISDIR/);
+  assert.equal(runs.has(second.id), false);
+  assert.equal(manager.get(second.id).status, "queued");
+
+  const checkpointFile = path.join(store.taskDir(first.id), "collection.json");
+  await rm(checkpointFile, { recursive: true, force: true });
+  await manager.resumeAll();
+  const completedDeadline = Date.now() + 2_000;
+  while (manager.list().some((task) => task.status !== "completed") && Date.now() < completedDeadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  const checkpoint = JSON.parse(await readFile(checkpointFile, "utf8"));
+
+  assert.equal(manager.controlStatus().storageError, null);
+  assert.ok(manager.list().every((task) => task.status === "completed"));
+  assert.equal(runs.get(first.id), 1);
+  assert.equal(runs.get(second.id), 1);
+  assert.equal(checkpoint.result.author, "checkpoint_first");
+});
+
+test("调度状态保存失败会冻结队列且恢复前重试原状态", async (t) => {
+  const rootDir = await mkdtemp(path.join(tmpdir(), "collector-scheduler-fault-"));
+  const { TaskManager } = await import(managerUrl);
+  const { TaskStore } = await import(storeUrl);
+  const store = new TaskStore(rootDir);
+  let writable = false;
+  const successfulStates = [];
+  const controlStore = {
+    load: async () => ({ paused: false, updatedAt: null, cooldowns: {} }),
+    save: async (state) => {
+      if (!writable) throw new Error("模拟调度状态写盘失败");
+      successfulStates.push(structuredClone(state));
+    },
+  };
+  let releaseFirst;
+  const firstRun = new Promise((resolve) => { releaseFirst = resolve; });
+  const runs = new Map();
+  const manager = new TaskManager({
+    store,
+    controlStore,
+    maxConcurrency: 1,
+    collectorFactory: () => ({ collect: async (task, { signal }) => {
+      runs.set(task.id, (runs.get(task.id) ?? 0) + 1);
+      if (task.profileKey === "scheduler_first" && runs.get(task.id) === 1) {
+        await Promise.race([
+          firstRun,
+          new Promise((_resolve, reject) => {
+            signal.addEventListener("abort", () => reject(new DOMException("已取消", "AbortError")), { once: true });
+          }),
+        ]);
+      }
+      return { author: task.profileKey, notes: [] };
+    } }),
+    exporter: async () => path.join(rootDir, "output"),
+  });
+  t.after(async () => {
+    releaseFirst();
+    await manager.shutdown();
+    await rm(rootDir, { recursive: true, force: true });
+  });
+  await manager.init();
+  const first = await manager.create({
+    url: "https://www.instagram.com/scheduler_first/",
+    range: { preset: "week" },
+  });
+  const second = await manager.create({
+    url: "https://www.instagram.com/scheduler_second/",
+    range: { preset: "week" },
+  });
+  await manager.start(first.id);
+  while (manager.get(first.id).status !== "running") {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  await manager.start(second.id);
+
+  await assert.rejects(() => manager.pauseAll(), /模拟调度状态写盘失败/);
+  releaseFirst();
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  assert.equal(manager.controlStatus().storageError, "模拟调度状态写盘失败");
+  assert.equal(runs.has(second.id), false);
+  await assert.rejects(() => manager.resumeAll(), /模拟调度状态写盘失败/);
+  assert.equal(manager.controlStatus().storageError, "模拟调度状态写盘失败");
+
+  writable = true;
+  await manager.resumeAll();
+  const completedDeadline = Date.now() + 2_000;
+  while (manager.list().some((task) => task.status !== "completed") && Date.now() < completedDeadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  assert.equal(manager.controlStatus().storageError, null);
+  assert.ok(manager.list().every((task) => task.status === "completed"));
+  assert.deepEqual(successfulStates.map((state) => state.paused), [true, false]);
 });

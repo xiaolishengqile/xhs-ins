@@ -304,7 +304,7 @@ test("平台冷却前保存部分结果失败时任务会正常失败", async (t
   assert.deepEqual(manager.controlStatus().cooldowns, {});
 });
 
-test("平台冷却状态保存失败时不会留下无效冷却", async (t) => {
+test("平台冷却状态保存失败时进入存储故障且不留下无效冷却", async (t) => {
   const manager = await managerFixture(
     t,
     async () => {
@@ -323,9 +323,10 @@ test("平台冷却状态保存失败时不会留下无效冷却", async (t) => {
   );
   const created = await createAndStart(manager, instagramInput(1));
 
-  await eventually(() => assert.equal(manager.get(created.id).status, "failed"));
+  await eventually(() => assert.equal(manager.get(created.id).status, "paused"));
 
   assert.equal(manager.get(created.id).error, "冷却状态保存失败");
+  assert.equal(manager.controlStatus().storageError, "冷却状态保存失败");
   assert.deepEqual(manager.controlStatus().cooldowns, {});
 });
 

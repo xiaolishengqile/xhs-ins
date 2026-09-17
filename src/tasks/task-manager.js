@@ -70,6 +70,7 @@ export class TaskManager {
     this.pauseRequested = new Set();
     this.taskInterruptions = new Map();
     this.platformBlocks = new Map();
+    this.pendingStorageWrites = new Set();
     this.paused = false;
     this.storageError = null;
     this.closed = false;
@@ -221,13 +222,7 @@ export class TaskManager {
     if (this.closed) throw new Error("任务管理器已关闭");
     if (!this.paused) {
       this.paused = true;
-      try {
-        await this.platformCooldowns.save(true);
-      } catch (error) {
-        this.paused = false;
-        this.#requestSchedule();
-        throw error;
-      }
+      await this.#persistStorage(() => this.platformCooldowns.save(true));
     }
     const queued = this.queue;
     this.queue = [];
@@ -256,6 +251,7 @@ export class TaskManager {
     if (!this.paused && !recoveringStorage) return this.controlStatus();
     if (recoveringStorage) {
       await Promise.allSettled([...this.runningPromises]);
+      await this.#retryStorageWrites();
       try {
         for (const task of this.tasks.values()) await this.store.save(task);
       } catch (error) {
@@ -281,7 +277,7 @@ export class TaskManager {
         throw error;
       }
     }
-    if (this.paused) await this.platformCooldowns.save(false);
+    if (this.paused) await this.#persistStorage(() => this.platformCooldowns.save(false));
     for (const task of this.tasks.values()) {
       if (task.status === TASK_STATUS.QUEUED && !this.queue.includes(task.id)) this.queue.push(task.id);
     }
@@ -484,7 +480,7 @@ export class TaskManager {
       const collector = this.collectorFactory(task.platform, browserSession ?? undefined);
       let saved = await checkpoint.load();
       if (task.refreshRequested) {
-        await checkpoint.extend(task.from, task.to);
+        await this.#persistStorage(() => checkpoint.extend(task.from, task.to));
         saved = await checkpoint.load();
         task.refreshRequested = false;
         await this.#saveTask(task);
@@ -494,11 +490,11 @@ export class TaskManager {
         signal: controller.signal, onProgress, checkpoint: saved,
         onCheckpoint: async (entry) => {
           throwIfAborted(controller.signal);
-          await checkpoint.record(entry);
+          await this.#persistStorage(() => checkpoint.record(entry));
         },
       });
       throwIfAborted(controller.signal);
-      await checkpoint.complete(result);
+      await this.#persistStorage(() => checkpoint.complete(result));
       throwIfAborted(controller.signal);
       task.author = result.author ?? task.profileKey;
       task.warningCount = result.warnings?.length ?? 0;
@@ -545,7 +541,7 @@ export class TaskManager {
             task.progress.stage = "平台持续拒绝访问";
           } else {
             const retryAfterMs = Number.isFinite(error.retryAfterMs) ? Math.max(0, error.retryAfterMs) : 5 * 60_000;
-            await this.platformCooldowns.set(task.platform, retryAfterMs);
+            await this.#persistStorage(() => this.platformCooldowns.set(task.platform, retryAfterMs));
             throwIfAborted(controller.signal);
             task.status = TASK_STATUS.QUEUED;
             task.error = "平台访问过于频繁，已自动降低速度";
@@ -610,7 +606,7 @@ export class TaskManager {
     for (const key of ["imagesDownloaded", "imagesAvailable", "imagesFailed", "imagesSkipped", "imagesUpgradeFailed", "previewImages"]) {
       task.progress[key] = saved[key] ?? 0;
     }
-    await checkpoint.invalidate(saved.notes ?? []);
+    await this.#persistStorage(() => checkpoint.invalidate(saved.notes ?? []));
   }
 
   #applyBlock(task, block, message = block.message) {
@@ -651,6 +647,28 @@ export class TaskManager {
     } catch (error) {
       this.#haltForStorage(error);
       throw error;
+    }
+  }
+
+  async #persistStorage(operation) {
+    try {
+      await operation();
+    } catch (error) {
+      this.pendingStorageWrites.add(operation);
+      this.#haltForStorage(error);
+      throw error;
+    }
+  }
+
+  async #retryStorageWrites() {
+    for (const operation of [...this.pendingStorageWrites]) {
+      try {
+        await operation();
+        this.pendingStorageWrites.delete(operation);
+      } catch (error) {
+        this.#haltForStorage(error);
+        throw error;
+      }
     }
   }
 
