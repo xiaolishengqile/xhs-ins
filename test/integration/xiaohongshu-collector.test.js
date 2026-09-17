@@ -66,6 +66,32 @@ function task() {
   };
 }
 
+test("恢复时复用已解析笔记并保留结果", async () => {
+  const profile = await fixture("profile-state.json");
+  const page = new FakePage({ profile, details: { "note-image-1": await fixture("note-detail.json") } });
+  const saved = { id: "note-image-1", media: [{ url: "https://example.com/saved.jpg" }] };
+  const collector = new XiaohongshuCollector({ browserManager: { newPage: async () => page } });
+  const result = await collector.collect(task(), {
+    signal: new AbortController().signal, onProgress: async () => {},
+    checkpoint: { entries: { "note-image-1": { key: "note-image-1", note: saved } } },
+  });
+  assert.deepEqual(result.notes, [saved]);
+  assert.ok(!page.visited.some((url) => url.includes("/explore/")));
+});
+
+test("主页遗漏待补笔记时仍保留补采内容，不能静默完成", async () => {
+  const profile = await fixture("profile-state.json");
+  profile.data.notes = [];
+  const saved = { id: "missing", url: "https://www.xiaohongshu.com/explore/missing", media: [{ url: "https://sns-webpic-qc.xhscdn.com/expired", error: "过期" }] };
+  const page = new FakePage({ profile, details: { missing: {} } });
+  const collector = new XiaohongshuCollector({ browserManager: { newPage: async () => page } });
+  await assert.rejects(collector.collect(task(), {
+    signal: new AbortController().signal, onProgress: async () => {},
+    checkpoint: { entries: {}, pending: { missing: { key: "missing", note: saved } } },
+  }), /无法读取笔记详情/);
+  assert.ok(page.visited.some((url) => url.includes("/explore/missing")));
+});
+
 test("采集范围内图文并跳过视频和旧笔记", async () => {
   const profile = await fixture("profile-state.json");
   const imageDetail = await fixture("note-detail.json");

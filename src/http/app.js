@@ -53,6 +53,14 @@ async function sendStatic(response, publicDir, pathname) {
 async function handleRequest(request, response, { manager, controller, publicDir }) {
   const url = new URL(request.url, "http://127.0.0.1");
   const { pathname } = url;
+  if (!["GET", "HEAD", "OPTIONS"].includes(request.method) && request.headers.origin) {
+    let sameOrigin = false;
+    try {
+      const origin = new URL(request.headers.origin);
+      sameOrigin = ["http:", "https:"].includes(origin.protocol) && origin.host === request.headers.host;
+    } catch { /* 不接受不透明或格式无效的网页来源。 */ }
+    if (!sameOrigin) return sendJson(response, 403, { error: "不允许外部网页控制本机采集服务" });
+  }
 
   if (request.method === "GET" && pathname === "/api/health") {
     return sendJson(response, 200, { status: "ok", maxConcurrency: manager.maxConcurrency });
@@ -103,7 +111,7 @@ async function handleRequest(request, response, { manager, controller, publicDir
     return sendJson(response, 200, await controller.startBatch(ids));
   }
 
-  const taskMatch = pathname.match(/^\/api\/tasks\/([0-9a-f-]+)(?:\/(start|cancel|retry|login|resume|recover))?$/i);
+  const taskMatch = pathname.match(/^\/api\/tasks\/([0-9a-f-]+)(?:\/(start|cancel|retry|update|login|resume|recover))?$/i);
   if (taskMatch) {
     const [, id, action] = taskMatch;
     const task = manager.get(id);
@@ -122,7 +130,7 @@ async function handleRequest(request, response, { manager, controller, publicDir
     if (action === "recover" && request.method === "POST") {
       return sendJson(response, 200, { task: await controller.recoverBrowser(id) });
     }
-    if (["start", "cancel", "retry"].includes(action) && request.method === "POST") {
+    if (["start", "cancel", "retry", "update"].includes(action) && request.method === "POST") {
       const updated = action === "start" ? await controller.start(id) : await manager[action](id);
       return sendJson(response, 200, { task: updated });
     }

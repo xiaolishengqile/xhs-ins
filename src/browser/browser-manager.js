@@ -58,11 +58,15 @@ export class BrowserManager {
   constructor({
     profilesDir,
     headless = process.env.COLLECTOR_HEADLESS !== "0",
+    idleTimeoutMs = 120_000,
     browserLaunchOptions = resolveSystemBrowserLaunchOptions,
     launchPersistentContext = (directory, options) => chromium.launchPersistentContext(directory, options),
   }) {
     this.profilesDir = path.resolve(profilesDir);
     this.headless = headless;
+    this.idleTimeoutMs = idleTimeoutMs;
+    this.idleTimers = new Map();
+    this.closingContexts = new Map();
     this.browserLaunchOptions = browserLaunchOptions;
     this.launchPersistentContext = launchPersistentContext;
     this.contexts = new Map();
@@ -81,6 +85,7 @@ export class BrowserManager {
 
   async createTaskSession(platform, taskId) {
     if (!taskId) throw new Error("任务编号不能为空");
+    this.#cancelIdleClose(platform);
     await this.#context(platform);
     const key = `${platform}:${taskId}`;
     const existing = this.taskSessions.get(key);
@@ -93,13 +98,25 @@ export class BrowserManager {
   releaseTaskSession(session) {
     const key = `${session.platform}:${session.taskId}`;
     if (this.taskSessions.get(key) === session) this.taskSessions.delete(key);
+    if ([...this.taskSessions.values()].some((item) => item.platform === session.platform)) return;
+    this.#cancelIdleClose(session.platform);
+    const timer = setTimeout(() => {
+      this.idleTimers.delete(session.platform);
+      void this.#closeCollectionContext(session.platform);
+    }, this.idleTimeoutMs);
+    timer.unref?.();
+    this.idleTimers.set(session.platform, timer);
   }
 
   async fetchBuffer(platform, url) {
     const safeUrl = validateMediaUrl(platform, url);
     const response = await (await this.#context(platform)).request.get(safeUrl);
-    if (!response.ok()) throw new Error(`图片下载失败：${response.status?.() ?? "未知状态"}`);
-    return response.body();
+    try {
+      if (!response.ok()) throw new Error(`图片下载失败：${response.status?.() ?? "未知状态"}`);
+      return await response.body();
+    } finally {
+      await response.dispose?.();
+    }
   }
 
   async openLogin(platform) {
@@ -130,6 +147,8 @@ export class BrowserManager {
   }
 
   async close() {
+    for (const platform of this.idleTimers.keys()) this.#cancelIdleClose(platform);
+    await Promise.allSettled([...this.closingContexts.values()]);
     const contexts = await Promise.allSettled([...this.contexts.values()]);
     const loginContexts = await Promise.allSettled([...this.loginContexts.values()]);
     this.contexts.clear();
@@ -146,6 +165,8 @@ export class BrowserManager {
 
   async #context(platform) {
     if (!MEDIA_HOSTS[platform]) throw new Error(`不支持的平台：${platform}`);
+    this.#cancelIdleClose(platform);
+    await this.closingContexts.get(platform);
     if (this.loginContexts.has(platform)) throw new Error("该平台正在登录，请先完成登录");
     if (!this.contexts.has(platform)) {
       const promise = this.#launch(platform);
@@ -184,7 +205,20 @@ export class BrowserManager {
     return { context, page };
   }
 
-  async #closeCollectionContext(platform) {
+  #cancelIdleClose(platform) {
+    clearTimeout(this.idleTimers.get(platform));
+    this.idleTimers.delete(platform);
+  }
+
+  #closeCollectionContext(platform) {
+    this.#cancelIdleClose(platform);
+    if (this.closingContexts.has(platform)) return this.closingContexts.get(platform);
+    const closing = this.#disposeCollectionContext(platform).finally(() => this.closingContexts.delete(platform));
+    this.closingContexts.set(platform, closing);
+    return closing;
+  }
+
+  async #disposeCollectionContext(platform) {
     const promise = this.contexts.get(platform);
     if (!promise) return;
     this.contexts.delete(platform);

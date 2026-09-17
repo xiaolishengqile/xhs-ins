@@ -51,6 +51,13 @@ test("文件名会移除系统不允许的字符", () => {
   assert.equal(safeFileName("..."), "未命名");
 });
 
+test("账号目录避开微软系统保留设备名和截断后的尾部空格", () => {
+  assert.equal(safeFileName("CON"), "_CON");
+  assert.equal(safeFileName("nul.photos"), "_nul.photos");
+  assert.equal(safeFileName("COM¹"), "_COM1");
+  assert.equal(safeFileName("a".repeat(79) + " .suffix"), "a".repeat(79));
+});
+
 test("图片按账号归档并使用序号和点赞数命名", async (t) => {
   const { rootDir, store } = await fixture(t);
 
@@ -93,6 +100,42 @@ test("同一笔记图片重复采集时不会再次下载", async (t) => {
   assert.equal((await readdir(indexDir)).length, 1);
 });
 
+test("补采失败图片时签名网址变化也不会重新下载成功图片", async (t) => {
+  const { store } = await fixture(t);
+  await store.save(task(), [note("post", 8, ["https://cdn.example/one?old", "https://cdn.example/two?old"])], {
+    fetchBuffer: async (url) => {
+      if (url.includes("two")) throw new Error("下载中断");
+      return jpegBuffer(1200, 800);
+    },
+  });
+  const fetched = [];
+  const result = await store.save(task(), [note("post", 8, ["https://cdn.example/one?new", "https://cdn.example/two?new"])], {
+    retryMedia: ["post:1"],
+    fetchBuffer: async (url) => { fetched.push(url); return jpegBuffer(1200, 800, 2); },
+  });
+  assert.deepEqual(fetched, ["https://cdn.example/two?new"]);
+  assert.equal(result.imagesFailed, 0);
+  assert.equal(result.imagesSkipped, 1);
+});
+
+test("补采中停止后恢复只下载尚未补成功的图片", async (t) => {
+  const { store } = await fixture(t);
+  const notes = [note("post", 8, ["https://cdn.example/one?new", "https://cdn.example/two?new"])];
+  const retryMedia = ["post:0", "post:1"];
+  const controller = new AbortController();
+  await assert.rejects(store.save(task(), notes, {
+    retryMedia, signal: controller.signal,
+    fetchBuffer: async () => jpegBuffer(1200, 800),
+    onProgress: async () => controller.abort(),
+  }), { name: "AbortError" });
+  const fetched = [];
+  await store.save(task(), notes, {
+    retryMedia,
+    fetchBuffer: async (url) => { fetched.push(url); return jpegBuffer(1200, 800, 2); },
+  });
+  assert.deepEqual(fetched, ["https://cdn.example/two?new"]);
+});
+
 test("同一账号并发保存时序号不会冲突", async (t) => {
   const { rootDir, store } = await fixture(t);
   const options = {
@@ -127,6 +170,8 @@ test("单张图片失败不会中断后续图片", async (t) => {
   );
 
   assert.equal(result.notes[0].media[0].error, "下载失败");
+  assert.equal(result.imagesFailed, 1);
+  assert.equal(result.imagesAvailable, 1);
   assert.ok(result.notes[0].media[1].localPath);
   assert.equal(progress.at(-1).imagesDownloaded, 1);
 });

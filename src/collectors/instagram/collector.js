@@ -128,13 +128,15 @@ export class InstagramCollector {
     this.platformCooldownMs = platformCooldownMs;
   }
 
-  async collect(task, { signal, onProgress }) {
+  async collect(task, { signal, onProgress, checkpoint = { entries: {} }, onCheckpoint = async () => {} }) {
     throwIfAborted(signal);
     const profilePage = await this.browserManager.newPage("instagram");
     let detailPage;
-    const notes = [];
-    const warnings = [];
-    let author = task.profileKey;
+    const cached = checkpoint.entries;
+    const pending = checkpoint.pending ?? {};
+    const notes = Object.values({ ...cached, ...pending }).map((entry) => entry.note).filter(Boolean);
+    const warnings = Object.values(cached).map((entry) => entry.warning).filter(Boolean);
+    let author = notes[0]?.author || task.profileKey;
     let processed = 0;
     const navigate = (page, url) => navigateWithRetry(page, url, {
       signal,
@@ -153,7 +155,7 @@ export class InstagramCollector {
       while (unchangedRounds < 2 && !stop) {
         throwIfAborted(signal);
         const snapshot = await readProfileSnapshot(profilePage, signal);
-        const links = snapshot.links.map(normalizedPostUrl).filter(Boolean);
+        const links = [...new Set([...Object.keys(pending), ...snapshot.links].map(normalizedPostUrl).filter(Boolean))];
         const fresh = links.filter((url) => !seen.has(url));
         checkPageText(snapshot.bodyText, seen.size === 0 && fresh.length === 0);
         for (const url of fresh) seen.add(url);
@@ -162,6 +164,14 @@ export class InstagramCollector {
 
         for (const url of fresh) {
           throwIfAborted(signal);
+          if (Object.hasOwn(cached, url)) {
+            const entry = cached[url];
+            consecutiveOld = entry.publishedAt && new Date(entry.publishedAt) < new Date(task.from)
+              ? consecutiveOld + 1 : 0;
+            processed += 1;
+            if (consecutiveOld >= 6) { stop = true; break; }
+            continue;
+          }
           try {
             await navigate(detailPage, url);
           } catch (error) {
@@ -169,6 +179,7 @@ export class InstagramCollector {
             if (error.status === 401) throw new LoginRequiredError();
             if (![404, 410].includes(error.status)) throw error;
             warnings.push(error.message);
+            await onCheckpoint({ key: url, warning: error.message, note: pending[url]?.note ?? null });
             processed += 1;
             await onProgress({ stage: "跳过不可访问帖子", current: processed, total: seen.size });
             continue;
@@ -181,12 +192,16 @@ export class InstagramCollector {
             detail.hasVideo,
           );
           author = note.author || author;
-          if (note.media.length > 0 && isInRange(note.publishedAt, task.from, task.to)) {
+          const included = note.media.length > 0 && isInRange(note.publishedAt, task.from, task.to);
+          if (included) {
+            const previous = notes.findIndex((item) => item.id === note.id);
+            if (previous >= 0) notes.splice(previous, 1);
             notes.push(note);
             consecutiveOld = 0;
           } else if (note.publishedAt && new Date(note.publishedAt) < new Date(task.from)) {
             consecutiveOld += 1;
           }
+          await onCheckpoint({ key: url, note: included ? note : pending[url]?.note ?? null, author, publishedAt: note.publishedAt });
           processed += 1;
           await onProgress({ stage: "读取帖子详情", current: processed, total: seen.size });
           if (consecutiveOld >= 6) {

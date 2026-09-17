@@ -41,13 +41,14 @@ export async function createRuntime({ dataDir = defaultDataDir(), outputDir = de
     controlStore,
     collectorFactory,
     taskSessionFactory: (task) => browserManager.createTaskSession(task.platform, task.id),
-    exporter: async (task, notes, _taskDir, { signal, onProgress, browserSession }) => {
+    exporter: async (task, notes, _taskDir, { signal, onProgress, browserSession, retryMedia }) => {
       const saved = await imageStore.save(task, notes, {
         fetchBuffer: (url) => browserSession.fetchBuffer(url),
         onProgress: (progress) => onProgress({ ...progress, stage: "下载图片" }),
         signal,
+        retryMedia,
       });
-      return saved.directory;
+      return saved;
     },
   });
   await manager.init();

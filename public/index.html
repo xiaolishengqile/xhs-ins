@@ -11,7 +11,7 @@
     <div class="page-shell">
       <header class="hero">
         <p class="eyebrow">本地私有工具</p>
-        <p class="hero-copy">先整理任务，再按需开始。后台最多同时静默采集 5 位博主。</p>
+        <p class="hero-copy">先整理任务，再按需开始。低占用模式每次静默采集 1 位博主，关闭页面后继续运行。</p>
       </header>
 
       <main>
@@ -21,7 +21,7 @@
               <p class="section-index">01</p>
               <h2 id="create-title">新建采集任务</h2>
             </div>
-            <span class="capacity-note">并发上限 5</span>
+            <span class="capacity-note">低占用模式 · 单任务</span>
           </div>
 
           <form id="task-form">
@@ -85,7 +85,7 @@
           </article>
           <article class="metric-card metric-running">
             <span>运行中</span>
-            <strong data-testid="running-summary">0 / 5</strong>
+            <strong data-testid="running-summary">0 / 1</strong>
           </article>
           <article class="metric-card">
             <span>等待中</span>
@@ -117,7 +117,7 @@
           <div id="bulk-actions" class="bulk-actions" hidden>
             <label class="bulk-select-all">
               <input id="select-all-tasks" type="checkbox" aria-label="全选任务" />
-              <span>全选</span>
+              <span>全选所有页</span>
             </label>
             <span id="selection-count">已选 0 项</span>
             <button id="start-selected" class="task-action" type="button" disabled>
@@ -132,6 +132,11 @@
             <p>在上方整理链接并加入待采集，然后手动开始任务。</p>
           </div>
           <div id="task-list" class="task-list" aria-live="polite"></div>
+          <nav id="pagination" class="bulk-actions" aria-label="任务分页" hidden>
+            <button id="previous-page" class="task-action" type="button">上一页</button>
+            <span id="page-label"></span>
+            <button id="next-page" class="task-action" type="button">下一页</button>
+          </nav>
         </section>
       </main>
 

@@ -51,7 +51,7 @@ test("健康检查与任务创建、列表和详情接口可用", async (t) => {
   const { url, manager } = await fixture(t);
   const health = await json(await fetch(`${url}/api/health`));
   assert.equal(health.response.status, 200);
-  assert.deepEqual(health.body, { status: "ok", maxConcurrency: 5 });
+  assert.deepEqual(health.body, { status: "ok", maxConcurrency: 1 });
 
   const created = await json(
     await fetch(`${url}/api/tasks`, {
@@ -77,6 +77,17 @@ test("健康检查与任务创建、列表和详情接口可用", async (t) => {
   assert.equal(listed.body.tasks.length, 1);
   const detail = await json(await fetch(`${url}/api/tasks/${created.body.task.id}`));
   assert.equal(detail.body.task.id, created.body.task.id);
+});
+
+test("常驻本机服务拒绝外部网页发起暂停操作", async (t) => {
+  const { url, manager } = await fixture(t);
+  const response = await fetch(`${url}/api/control/pause`, {
+    method: "POST", headers: { origin: "https://unrelated.example" },
+  });
+  assert.equal(response.status, 403);
+  assert.equal(manager.controlStatus().paused, false);
+  const sameOrigin = await fetch(`${url}/api/control/pause`, { method: "POST", headers: { origin: url } });
+  assert.equal(sameOrigin.status, 200);
 });
 
 test("批量启动接口只启动选中的待开始任务", async (t) => {
@@ -239,7 +250,7 @@ test("批量创建会跳过无效和重复链接并返回任务摘要", async (t
   assert.deepEqual(result.body.rejected, [
     { line: 3, url: "broken", reason: "请输入完整、安全的主页链接" },
   ]);
-  assert.equal(result.body.control.maxConcurrency, 5);
+  assert.equal(result.body.control.maxConcurrency, 1);
   assert.equal(manager.list().length, 2);
 });
 
@@ -277,7 +288,7 @@ test("控制接口可以幂等暂停和继续调度器", async (t) => {
   assert.equal(initial.response.status, 200);
   assert.deepEqual(initial.body, {
     paused: false,
-    maxConcurrency: 5,
+    maxConcurrency: 1,
     running: 0,
     queued: 0,
     pausedTasks: 0,

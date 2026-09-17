@@ -20,6 +20,10 @@ const elements = {
   linkFile: document.querySelector("#link-file"),
   importLinks: document.querySelector("#import-links"),
   loadBuiltin: document.querySelector("#load-builtin"),
+  pagination: document.querySelector("#pagination"),
+  pageLabel: document.querySelector("#page-label"),
+  previousPage: document.querySelector("#previous-page"),
+  nextPage: document.querySelector("#next-page"),
 };
 
 const STATUS = {
@@ -30,12 +34,15 @@ const STATUS = {
   waiting_user: "等待人工处理",
   blocked: "运行环境受阻",
   completed: "已完成",
+  partial: "部分完成",
   failed: "失败",
   cancelled: "已取消",
 };
 
 let currentTasks = [];
-let currentControl = { paused: false, maxConcurrency: 5 };
+let currentControl = { paused: false, maxConcurrency: 1 };
+let currentPage = 0;
+const PAGE_SIZE = 30;
 let refreshPromise = null;
 let refreshAgain = false;
 let hasActiveTasks = false;
@@ -127,6 +134,12 @@ function renderTask(task) {
   if (previewImages > 0) {
     card.append(node("p", "task-warning", `${previewImages} 张图片仅获得平台预览尺寸`));
   }
+  if (task.progress?.imagesAvailable !== undefined) {
+    card.append(node("p", "task-image-summary", `已保存 ${task.progress.imagesAvailable} 张 · 失败 ${task.progress.imagesFailed ?? 0} 张 · 复用 ${task.progress.imagesSkipped ?? 0} 张`));
+  }
+  if (task.progress?.imagesUpgradeFailed > 0) {
+    card.append(node("p", "task-warning", `${task.progress.imagesUpgradeFailed} 张高清升级失败，已保留原图`));
+  }
   if (task.error) card.append(node("p", "task-error", task.error));
 
   const actions = node("div", "task-actions");
@@ -135,6 +148,8 @@ function renderTask(task) {
     actions.append(actionButton(task, "cancel", "取消"));
   }
   if (["failed", "cancelled"].includes(task.status)) actions.append(actionButton(task, "retry", "重试"));
+  if (task.status === "partial") actions.append(actionButton(task, "retry", "补采失败图片"));
+  if (["completed", "partial"].includes(task.status)) actions.append(actionButton(task, "update", "采集新增"));
   if (task.status === "waiting_user") {
     actions.append(actionButton(task, "login", "打开登录窗口"));
     actions.append(actionButton(task, "resume", "我已处理，继续"));
@@ -172,7 +187,7 @@ function render(tasks, control = currentControl) {
     document.querySelector(`#${status}-summary`).textContent = String(tasks.filter((task) => task.status === status).length);
   }
   const running = tasks.filter((task) => task.status === "running").length;
-  document.querySelector('[data-testid="running-summary"]').textContent = `${running} / ${control.maxConcurrency ?? 5}`;
+  document.querySelector('[data-testid="running-summary"]').textContent = `${running} / ${control.maxConcurrency ?? 1}`;
   const coolingPlatforms = Object.keys(control.cooldowns ?? {});
   const browserBlocked = (control.platformBlocks ?? []).some((block) => block.reason === "browser");
   const schedulerText = control.paused
@@ -189,7 +204,22 @@ function render(tasks, control = currentControl) {
   elements.pauseAll.textContent = control.paused ? "继续全部" : "暂停全部";
   elements.pauseAll.disabled = controlBusy;
   elements.emptyState.hidden = tasks.length > 0;
-  elements.taskList.replaceChildren(...tasks.map(renderTask));
+  const pages = Math.max(1, Math.ceil(tasks.length / PAGE_SIZE));
+  currentPage = Math.min(currentPage, pages - 1);
+  elements.pagination.hidden = tasks.length <= PAGE_SIZE;
+  elements.pageLabel.textContent = `第 ${currentPage + 1} / ${pages} 页，共 ${tasks.length} 项`;
+  elements.previousPage.disabled = currentPage === 0;
+  elements.nextPage.disabled = currentPage === pages - 1;
+  const visible = tasks.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE);
+  const existing = new Map([...elements.taskList.children].map((card) => [card.dataset.taskId, card]));
+  elements.taskList.replaceChildren(...visible.map((task) => {
+    const signature = JSON.stringify([task, selectedTaskIds.has(task.id)]);
+    const card = existing.get(task.id);
+    if (card?.dataset.signature === signature) return card;
+    const next = renderTask(task);
+    next.dataset.signature = signature;
+    return next;
+  }));
   updateBulkActions();
 }
 
@@ -215,6 +245,12 @@ function refresh() {
 
 elements.urlInput.addEventListener("input", () => {
   if (!settingInput) inputSource = "manual";
+});
+
+elements.previousPage.addEventListener("click", () => { currentPage -= 1; render(currentTasks); });
+elements.nextPage.addEventListener("click", () => { currentPage += 1; render(currentTasks); });
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") refresh();
 });
 
 elements.preset.addEventListener("change", () => {
@@ -421,5 +457,5 @@ elements.deleteSelected.addEventListener("click", async () => {
 
 await refresh();
 setInterval(() => {
-  if (document.visibilityState === "visible" && hasActiveTasks) refresh();
-}, 1_000);
+  if (document.visibilityState === "visible" && hasActiveTasks && !refreshPromise) refresh();
+}, 3_000);

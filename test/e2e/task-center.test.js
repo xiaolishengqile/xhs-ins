@@ -118,6 +118,25 @@ test("加载内置博主只预览，确认后分批创建 719 个待开始任务
   await page.getByText("已创建 719 个待开始任务").waitFor({ timeout: 12_000 });
   assert.equal(manager.list().length, 719);
   assert.ok(manager.list().every((task) => task.status === "pending"));
+  assert.equal(await page.locator("[data-task-id]").count(), 30);
+  await page.getByRole("checkbox", { name: "全选任务" }).check();
+  await page.getByText("已选 719 项", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "下一页" }).click();
+  await page.getByText("第 2 / 24 页，共 719 项", { exact: true }).waitFor();
+  assert.equal(await page.locator("[data-task-id] input:checked").count(), 30);
+});
+
+test("部分完成显示图片统计并允许补采", async (t) => {
+  const { manager, page, url } = await fixture(t, async () => ({ notes: [] }), {
+    exporter: async () => ({ directory: "images", imagesAvailable: 2, imagesFailed: 1, imagesSkipped: 1, notes: [] }),
+  });
+  const task = await manager.create({ url: "https://www.instagram.com/partial_creator/", range: { preset: "year" } });
+  await manager.start(task.id);
+  await eventually(() => assert.equal(manager.get(task.id).status, "partial"));
+  await page.goto(url);
+  await page.locator('[data-status="partial"]').waitFor();
+  await page.getByText("已保存 2 张 · 失败 1 张 · 复用 1 张", { exact: true }).waitFor();
+  assert.equal(await page.getByRole("button", { name: "补采失败图片" }).count(), 1);
 });
 
 test("选中待开始任务后可以批量开始", async (t) => {

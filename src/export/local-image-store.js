@@ -51,6 +51,7 @@ function applyStoredMedia(media, stored, localPath) {
   Object.assign(media, {
     localPath,
     error: null,
+    warning: null,
     width: stored.width ?? null,
     height: stored.height ?? null,
     quality: stored.quality ?? "unknown",
@@ -81,6 +82,7 @@ export class LocalImageStore {
     fetchBuffer,
     onProgress = async () => {},
     signal,
+    retryMedia = null,
   }) {
     const account = safeFileName(task.profileKey, "未知博主");
     const authorDir = path.join(this.rootDir, account);
@@ -92,6 +94,10 @@ export class LocalImageStore {
     let current = 0;
     let imagesDownloaded = 0;
     let previewImages = 0;
+    let imagesAvailable = 0;
+    let imagesFailed = 0;
+    let imagesUpgradeFailed = 0;
+    const retryKeys = retryMedia ? new Set(retryMedia) : null;
 
     for (const note of result) {
       for (let mediaIndex = 0; mediaIndex < (note.media?.length ?? 0); mediaIndex += 1) {
@@ -113,7 +119,9 @@ export class LocalImageStore {
           existing = null;
           existingPath = null;
         }
-        if (existingPath && storedImageCoversCandidate(existing, media)) {
+        const preserveSuccessful = retryKeys && !retryKeys.has(`${note.id}:${mediaIndex}`);
+        // 补采中退出时，索引可能已落盘但整轮失败清单尚未更新；尺寸/来源仍能证明这张已完成。
+        if (existingPath && (preserveSuccessful || storedImageCoversCandidate(existing, media))) {
           if (existing.sourceUrl !== media.url) {
             existing = { ...existing, sourceUrl: media.url };
             index.items[key] = existing;
@@ -139,12 +147,18 @@ export class LocalImageStore {
           if (downloaded) imagesDownloaded += 1;
         }
         if (media.quality === "preview") previewImages += 1;
+        if (media.localPath) imagesAvailable += 1;
+        if (media.error) imagesFailed += 1;
+        if (media.warning) imagesUpgradeFailed += 1;
         current += 1;
-        await onProgress({ current, total, imagesDownloaded, previewImages });
+        await onProgress({ current, total, imagesDownloaded, previewImages, imagesAvailable, imagesFailed, imagesUpgradeFailed });
       }
     }
 
-    return { directory: authorDir, notes: result, imagesDownloaded, previewImages };
+    return {
+      directory: authorDir, notes: result, imagesDownloaded, previewImages,
+      imagesAvailable, imagesFailed, imagesUpgradeFailed, imagesSkipped: imagesAvailable - imagesDownloaded,
+    };
   }
 
   async #download({

@@ -30,6 +30,7 @@ async function managerFixture(t, collect, options = {}) {
     store: new TaskStore(rootDir),
     collectorFactory: () => ({ collect }),
     exporter: async (task) => path.join(rootDir, task.id, "result.zip"),
+    maxConcurrency: 5,
     now: () => new Date(2026, 7, 28, 12),
     ...options,
   });

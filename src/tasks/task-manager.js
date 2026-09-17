@@ -5,6 +5,7 @@ import { resolveDateRange } from "../domain/date-range.js";
 import { RESTARTABLE_STATUS, TASK_STATUS } from "./task-states.js";
 import { normalizeBatchEntries } from "./batch-input.js";
 import { PlatformCooldowns } from "./platform-cooldowns.js";
+import { CollectionCheckpoint } from "./collection-checkpoint.js";
 
 const PLATFORM_BLOCKS = Object.freeze({
   login: Object.freeze({
@@ -45,7 +46,7 @@ export class TaskManager {
       load: async () => ({ paused: false, updatedAt: null }),
       save: async () => {},
     },
-    maxConcurrency = 5,
+    maxConcurrency = 1,
     platformConcurrency = { instagram: 1 },
     maxPlatformRecoveryAttempts = 2,
     now = () => new Date(),
@@ -286,12 +287,24 @@ export class TaskManager {
   }
 
   async retry(id) {
+    if (this.closed) throw new Error("任务管理器已关闭");
+    if (this.paused) throw new Error("调度器已暂停，请先继续调度");
     const task = this.#requireTask(id);
-    if (![TASK_STATUS.FAILED, TASK_STATUS.CANCELLED].includes(task.status)) {
-      throw new Error("只有失败或已取消任务可以重试");
+    if (![TASK_STATUS.FAILED, TASK_STATUS.CANCELLED, TASK_STATUS.PARTIAL].includes(task.status)) {
+      throw new Error("只有失败、部分完成或已取消任务可以重试");
     }
     task.recoveryAttempts = 0;
     return this.#requeue(task, "等待重试");
+  }
+
+  async update(id) {
+    if (this.closed) throw new Error("任务管理器已关闭");
+    if (this.paused) throw new Error("调度器已暂停，请先继续调度");
+    const task = this.#requireTask(id);
+    if (![TASK_STATUS.COMPLETED, TASK_STATUS.PARTIAL].includes(task.status)) throw new Error("只有已完成或部分完成任务可以采集新增");
+    const range = resolveDateRange({ preset: "year" }, this.now());
+    Object.assign(task, { to: range.to, completedAt: null, recoveryAttempts: 0, refreshRequested: true });
+    return this.#requeue(task, "等待采集新增");
   }
 
   async resume(id) {
@@ -351,7 +364,10 @@ export class TaskManager {
   async shutdown() {
     this.closed = true;
     this.platformCooldowns.close();
-    for (const controller of this.running.values()) controller.abort();
+    for (const [id, controller] of this.running) {
+      if (this.tasks.get(id)?.status !== TASK_STATUS.CANCELLED) this.pauseRequested.add(id);
+      controller.abort();
+    }
     await Promise.allSettled([...this.runningPromises]);
   }
 
@@ -423,6 +439,7 @@ export class TaskManager {
 
   async #run(task) {
     const controller = new AbortController();
+    const checkpoint = new CollectionCheckpoint(this.store.taskDir(task.id));
     let browserSession = null;
     this.running.set(task.id, controller);
     task.status = TASK_STATUS.RUNNING;
@@ -443,20 +460,35 @@ export class TaskManager {
       browserSession = await this.taskSessionFactory(clone(task));
       throwIfAborted(controller.signal);
       const collector = this.collectorFactory(task.platform, browserSession ?? undefined);
-      const result = await collector.collect(clone(task), {
-        signal: controller.signal,
-        onProgress,
+      let saved = await checkpoint.load();
+      if (task.refreshRequested) {
+        await checkpoint.extend(task.from, task.to);
+        saved = await checkpoint.load();
+        task.refreshRequested = false;
+        await this.store.save(task);
+      }
+      throwIfAborted(controller.signal);
+      const result = saved.result ?? await collector.collect(clone(task), {
+        signal: controller.signal, onProgress, checkpoint: saved,
+        onCheckpoint: async (entry) => {
+          throwIfAborted(controller.signal);
+          await checkpoint.record(entry);
+        },
       });
-      if (controller.signal.aborted) return;
+      throwIfAborted(controller.signal);
+      await checkpoint.complete(result);
+      throwIfAborted(controller.signal);
       task.author = result.author ?? task.profileKey;
       task.warningCount = result.warnings?.length ?? 0;
-      task.resultPath = await this.exporter(task, result.notes ?? [], this.store.taskDir(task.id), {
+      await this.#export(task, result.notes ?? [], checkpoint, {
         signal: controller.signal,
         onProgress,
         browserSession,
       });
-      task.status = TASK_STATUS.COMPLETED;
-      task.progress.stage = task.warningCount > 0
+      throwIfAborted(controller.signal);
+      const incomplete = (task.progress.imagesFailed ?? 0) + (task.progress.imagesUpgradeFailed ?? 0);
+      task.status = incomplete > 0 ? TASK_STATUS.PARTIAL : TASK_STATUS.COMPLETED;
+      task.progress.stage = incomplete > 0 ? `部分完成，${incomplete} 张图片需重试` : task.warningCount > 0
         ? `采集完成，跳过 ${task.warningCount} 篇不可访问帖子`
         : "采集完成";
       task.completedAt = this.now().toISOString();
@@ -477,7 +509,7 @@ export class TaskManager {
           task.warningCount = Math.max(task.warningCount ?? 0, partial?.warnings?.length ?? 0);
           if ((partial?.notes?.length ?? 0) > 0) {
             task.author = partial.author ?? task.profileKey;
-            task.resultPath = await this.exporter(task, partial.notes, this.store.taskDir(task.id), {
+            await this.#export(task, partial.notes, checkpoint, {
               signal: controller.signal,
               onProgress,
               browserSession,
@@ -539,6 +571,22 @@ export class TaskManager {
       : paused
         ? "已暂停"
         : "已取消";
+  }
+
+  async #export(task, notes, checkpoint, options) {
+    const saved = await this.exporter(task, notes, this.store.taskDir(task.id), {
+      ...options, retryMedia: checkpoint.value.retryMedia,
+    });
+    throwIfAborted(options.signal);
+    if (typeof saved === "string") {
+      task.resultPath = saved;
+      return;
+    }
+    task.resultPath = saved.directory;
+    for (const key of ["imagesDownloaded", "imagesAvailable", "imagesFailed", "imagesSkipped", "imagesUpgradeFailed", "previewImages"]) {
+      task.progress[key] = saved[key] ?? 0;
+    }
+    await checkpoint.invalidate(saved.notes ?? []);
   }
 
   #applyBlock(task, block, message = block.message) {

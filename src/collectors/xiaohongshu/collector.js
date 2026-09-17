@@ -51,7 +51,7 @@ export class XiaohongshuCollector {
     this.browserManager = browserManager;
   }
 
-  async collect(task, { signal, onProgress }) {
+  async collect(task, { signal, onProgress, checkpoint = { entries: {} }, onCheckpoint = async () => {} }) {
     throwIfAborted(signal);
     const profilePage = await this.browserManager.newPage("xiaohongshu");
     let detailPage;
@@ -104,8 +104,12 @@ export class XiaohongshuCollector {
       if (allCandidates.length > 0 && usable.length === 0) throw new LoginRequiredError("公开主页未返回笔记编号，请先登录");
       await checkHumanAction(profilePage, usable.length === 0);
 
+      const pending = checkpoint.pending ?? {};
       const selected = usable.filter((item) => item.type !== "video" && inRange(item.publishedAt, task.from, task.to));
-      const notes = [];
+      for (const [id, entry] of Object.entries(pending)) {
+        if (!selected.some((item) => item.id === id)) selected.push({ id, url: entry.note.url });
+      }
+      const notes = Object.values({ ...checkpoint.entries, ...pending }).map((entry) => entry.note).filter(Boolean);
       if (selected.length > 0) {
         detailPage = await this.browserManager.newPage("xiaohongshu");
         if (detailPage !== profilePage) detailPage.on?.("response", responseListener);
@@ -113,7 +117,8 @@ export class XiaohongshuCollector {
       for (let index = 0; index < selected.length; index += 1) {
         throwIfAborted(signal);
         const item = selected[index];
-        const url = detailUrl(item);
+        if (Object.hasOwn(checkpoint.entries, item.id)) continue;
+        const url = item.url || detailUrl(item);
         responsePayloads.length = 0;
         await detailPage.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
         await detailPage.waitForTimeout(600);
@@ -132,7 +137,13 @@ export class XiaohongshuCollector {
           await checkHumanAction(detailPage, true);
           throw new Error(`无法读取笔记详情：${item.title || item.id}`);
         }
-        if (note.type !== "video" && inRange(note.publishedAt, task.from, task.to)) notes.push(note);
+        const included = note.type !== "video" && inRange(note.publishedAt, task.from, task.to);
+        if (included) {
+          const previous = notes.findIndex((entry) => entry.id === note.id);
+          if (previous >= 0) notes.splice(previous, 1);
+          notes.push(note);
+        }
+        await onCheckpoint({ key: item.id, note: included ? note : pending[item.id]?.note ?? null, author: note.author, publishedAt: note.publishedAt });
         await onProgress({ stage: "读取笔记详情", current: index + 1, total: selected.length });
       }
 

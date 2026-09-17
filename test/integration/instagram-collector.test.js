@@ -467,3 +467,45 @@ test("开始采集前取消不会创建浏览器页面", async () => {
   );
   assert.equal(pageCount, 0);
 });
+
+test("逐帖断点在中断后复用，已解析帖子不再次打开", async () => {
+  const html = await readFile(new URL("../fixtures/instagram/post.html", import.meta.url), "utf8");
+  const firstUrl = "https://www.instagram.com/p/shortcode-1/";
+  const secondUrl = "https://www.instagram.com/p/shortcode-2/";
+  const details = {
+    [firstUrl]: { html, bodyText: "Public post", images: ["https://scontent.cdninstagram.com/one.jpg"] },
+    [secondUrl]: { html: html.replaceAll("shortcode-1", "shortcode-2"), bodyText: "Public post", images: ["https://scontent.cdninstagram.com/two.jpg"] },
+  };
+  const checkpoint = { entries: {} };
+  const aborted = new AbortController();
+  const firstPages = [new ProfilePage([firstUrl, secondUrl]), new DetailPage(details)];
+  const first = new InstagramCollector({ browserManager: { newPage: async () => firstPages.shift() } });
+  await assert.rejects(first.collect(task(), {
+    signal: aborted.signal, onProgress: async () => {},
+    onCheckpoint: async (entry) => { checkpoint.entries[entry.key] = entry; aborted.abort(); },
+  }), { name: "AbortError" });
+  const detailPage = new DetailPage(details);
+  const secondPages = [new ProfilePage([firstUrl, secondUrl]), detailPage];
+  const second = new InstagramCollector({ browserManager: { newPage: async () => secondPages.shift() } });
+  const result = await second.collect(task(), {
+    signal: new AbortController().signal, onProgress: async () => {}, checkpoint,
+  });
+  assert.deepEqual(detailPage.visited, [secondUrl]);
+  assert.deepEqual(result.notes.map((item) => item.id), ["shortcode-1", "shortcode-2"]);
+});
+
+test("待补帖子即使主页不再返回也会重试并保留失败图片", async () => {
+  const missing = "https://www.instagram.com/p/missing/";
+  const saved = { id: "missing", url: missing, media: [{ url: "https://scontent.cdninstagram.com/expired.jpg", error: "过期" }] };
+  const profile = new ProfilePage([]);
+  const detail = new DetailPage({});
+  detail.goto = async (url) => { detail.visited.push(url); return { ok: () => false, status: () => 404 }; };
+  const pages = [profile, detail];
+  const collector = new InstagramCollector({ browserManager: { newPage: async () => pages.shift() } });
+  const result = await collector.collect(task(), {
+    signal: new AbortController().signal, onProgress: async () => {},
+    checkpoint: { entries: {}, pending: { [missing]: { key: missing, note: saved } } },
+  });
+  assert.deepEqual(detail.visited, [missing]);
+  assert.deepEqual(result.notes, [saved]);
+});
