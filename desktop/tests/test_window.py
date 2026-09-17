@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from PySide6.QtTest import QSignalSpy
+from PySide6.QtTest import QTest
 
 from support import APP, LocalServer, wait_for
 from collector_desktop.backend import BackendClient
@@ -146,3 +147,77 @@ class WindowTest(unittest.TestCase):
                 window.request_exit(False)
                 window.deleteLater()
                 APP.processEvents()
+
+    def test_status_timer_does_not_poll_hidden_task_page(self):
+        _, MainWindow = self.classes()
+        server = LocalServer(lambda m, p, b: (200, {"tasks": []} if p == "/api/tasks" else {"paused": False}))
+        with tempfile.TemporaryDirectory() as directory:
+            backend = BackendClient(directory)
+            backend.set_status({"url": server.url, "dataDir": directory, "outputDir": directory})
+            window = MainWindow(backend, Settings(), Path(directory) / "desktop-settings.json")
+            window.show()
+            wait_for(lambda: not window.tasks.refreshing)
+            # 隔离已另行集成测试的进程边界；列表请求仍实际通过本机 HTTP。
+            with patch.object(backend, "command", side_effect=lambda action, callback: callback(backend.status, "")):
+                try:
+                    for index in (1, 2):
+                        window.navigation.setCurrentRow(index)
+                        wait_for(lambda: not window.tasks.refreshing)
+                        server.calls.clear()
+                        window.status_timer.start(20)
+                        QTest.qWait(85)
+                        self.assertTrue(window.status_timer.isActive())
+                        self.assertFalse(window.tasks.timer.isActive())
+                        self.assertEqual(server.calls, [])
+                    window.hide()
+                    window.start_result(backend.status, "")
+                    QTest.qWait(30)
+                    self.assertEqual(server.calls, [])
+                    window.activate()
+                    QTest.qWait(30)
+                    self.assertEqual(server.calls, [])
+                    window.navigation.setCurrentRow(0)
+                    wait_for(lambda: any(path == "/api/tasks" for _, path, _ in server.calls))
+                    self.assertTrue(window.tasks.timer.isActive())
+                finally:
+                    window.request_exit(False)
+                    window.deleteLater()
+                    APP.processEvents()
+        server.close()
+
+    def test_tray_resume_uses_explicit_action_after_external_pause(self):
+        _, MainWindow = self.classes()
+        control = {"paused": False}
+
+        def respond(method, path, body):
+            if method == "POST":
+                control["paused"] = path.endswith("/pause")
+            return 200, {"tasks": []} if path == "/api/tasks" else dict(control)
+
+        server = LocalServer(respond)
+        with tempfile.TemporaryDirectory() as directory:
+            backend = BackendClient(directory)
+            backend.set_status({"url": server.url, "dataDir": directory, "outputDir": directory})
+            window = MainWindow(backend, Settings(), Path(directory) / "desktop-settings.json")
+            window.show()
+            wait_for(lambda: not window.tasks.refreshing)
+            window.hide()
+            self.assertFalse(window.tasks.control["paused"])
+            control["paused"] = True  # 另一个入口在窗口隐藏后暂停。
+            actions = window.tray.contextMenu().actions()
+            resume = next(action for action in actions if action.text() in ("继续采集", "暂停 / 继续"))
+            try:
+                resume.trigger()
+                wait_for(lambda: not window.tasks.busy and not window.tasks.refreshing)
+                self.assertFalse(control["paused"])
+                self.assertIn(("POST", "/api/control/resume", b""), server.calls)
+                pause = next(action for action in actions if action.text() == "暂停采集")
+                pause.trigger()
+                wait_for(lambda: not window.tasks.busy and not window.tasks.refreshing)
+                self.assertTrue(control["paused"])
+                self.assertIn(("POST", "/api/control/pause", b""), server.calls)
+            finally:
+                window.request_exit(False)
+                window.deleteLater()
+                APP.processEvents()
+        server.close()

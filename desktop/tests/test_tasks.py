@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from PySide6.QtCore import Qt
@@ -103,10 +104,10 @@ class TasksTest(unittest.TestCase):
         self.assertTrue(self.page.timer.isActive())
 
     def test_file_import_uses_backend_parser(self):
-        with tempfile.NamedTemporaryFile(suffix=".txt") as handle:
-            handle.write(b"https://www.instagram.com/imported/")
-            handle.flush()
-            self.page.create_form.import_file(handle.name)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "profiles.txt"
+            path.write_bytes(b"https://www.instagram.com/imported/")
+            self.page.create_form.import_file(str(path))
             wait_for(lambda: "imported" in self.page.create_form.urls.toPlainText())
         self.assertTrue(any(c[1] == "/api/link-files/parse" and isinstance(c[2], bytes) for c in self.server.calls))
 

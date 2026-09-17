@@ -49,7 +49,9 @@ class MainWindow(QMainWindow):
         self.tray = QSystemTrayIcon(icon, self)
         self.tray.setToolTip("采图台：本机图片采集")
         menu = QMenu(self)
-        for text, callback in (("显示主窗口", self.activate), ("暂停 / 继续", self.tasks.toggle_pause),
+        for text, callback in (("显示主窗口", self.activate),
+                               ("暂停采集", lambda: self.tasks.operation("POST", "/api/control/pause")),
+                               ("继续采集", lambda: self.tasks.operation("POST", "/api/control/resume")),
                                ("仅退出界面", lambda: self.request_exit(False)),
                                ("退出并停止采集", lambda: self.request_exit(True))):
             action = QAction(text, self)
@@ -78,7 +80,7 @@ class MainWindow(QMainWindow):
         if error:
             self.connection.setText(error + "；可在设置页检查依赖后重新连接。")
             self.preferences.connection.setText("连接失败")
-        else:
+        elif self.tasks.isVisible() and not self.isMinimized():
             self.tasks.refresh()
 
     def connected(self, status):
@@ -101,7 +103,8 @@ class MainWindow(QMainWindow):
         self.showNormal()
         self.raise_()
         self.activateWindow()
-        self.tasks.refresh()
+        if self.tasks.isVisible():
+            self.tasks.refresh()
 
     def showEvent(self, event):
         super().showEvent(event)
