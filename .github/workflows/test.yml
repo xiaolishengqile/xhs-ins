@@ -4,7 +4,7 @@ jobs:
   test:
     strategy:
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        os: [windows-latest, ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -16,6 +16,20 @@ jobs:
       - run: npx playwright install --with-deps chromium
       - run: npm run check
       - run: npm test
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r desktop/requirements.txt
+      - name: 原生桌面无显示自动化测试
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m unittest discover -s desktop/tests -v
+      - name: 苹果原生表单布局回归
+        if: runner.os == 'macOS'
+        env:
+          QT_QPA_PLATFORM: cocoa
+          PYTHONPATH: desktop/tests
+        run: python -m unittest test_window.WindowTest.test_preferences_paths_use_available_width_and_wrap -v
       - if: runner.os == 'Windows'
         shell: powershell
         run: |
