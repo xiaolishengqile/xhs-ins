@@ -8,6 +8,8 @@ export class ApplicationController {
   constructor({
     manager,
     browserManager,
+    dataDir,
+    preferencesStore,
     outputDir = path.join(homedir(), "Pictures", "博主图片采集"),
     ensureDir = (directory) => mkdir(directory, { recursive: true }),
     openPath = openSystemPath,
@@ -15,6 +17,8 @@ export class ApplicationController {
   }) {
     this.manager = manager;
     this.browserManager = browserManager;
+    this.dataDir = dataDir ? path.resolve(dataDir) : null;
+    this.preferencesStore = preferencesStore;
     this.outputDir = path.resolve(outputDir);
     this.ensureDir = ensureDir;
     this.openPath = openPath;
@@ -70,6 +74,22 @@ export class ApplicationController {
     await this.ensureDir(this.outputDir);
     await this.openPath(this.outputDir);
     return { directory: this.outputDir };
+  }
+
+  async openImageDirectory(directory) {
+    this.#assertLocal();
+    await this.openPath(directory);
+    return { directory };
+  }
+
+  async settings() {
+    const preferences = await this.preferencesStore.load();
+    return { ...preferences, actualOutputDir: this.outputDir, dataDir: this.dataDir, nodeVersion: process.version };
+  }
+
+  async saveSettings(input) {
+    await this.preferencesStore.save(input);
+    return this.settings();
   }
 
   #assertLocal() {

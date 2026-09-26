@@ -1,7 +1,7 @@
 ﻿param(
   [string]$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
   [string]$DataDir = (Join-Path $ProjectRoot ".data"),
-  [string]$OutputDir = (Join-Path ([Environment]::GetFolderPath("MyPictures")) "博主图片采集"),
+  [string]$OutputDir = "",
   [int]$Port = 4310
 )
 
@@ -13,7 +13,8 @@ $node = (Get-Command node -ErrorAction Stop).Path
 $cli = Join-Path $ProjectRoot "scripts\background.js"
 $installStartup = Join-Path $ProjectRoot "scripts\windows\install-startup.ps1"
 $uninstallStartup = Join-Path $ProjectRoot "scripts\windows\uninstall-startup.ps1"
-$commonArguments = @("--data-dir", $DataDir, "--output-dir", $OutputDir, "--port", "$Port", "--json")
+$commonArguments = @("--data-dir", $DataDir, "--port", "$Port", "--json")
+if ($OutputDir) { $commonArguments += @("--output-dir", $OutputDir) }
 
 function ConvertTo-NativeArgument([string]$value) {
   if ($value -notmatch '[\s"]') { return $value }

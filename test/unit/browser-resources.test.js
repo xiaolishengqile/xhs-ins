@@ -57,3 +57,30 @@ test("最后一个会话关闭后空闲释放浏览器，新任务会取消回�
   assert.equal(contexts.length, 2);
   await third.close();
 });
+
+test("普通采集始终隐藏，只有主动打开登录窗口才显示浏览器", async (t) => {
+  const launches = [];
+  const { manager } = await fixture(t, null, {
+    headless: false,
+    browserLaunchOptions: async () => [{ channel: "chrome", headless: false }],
+    launchPersistentContext: async (_directory, options) => {
+      launches.push(options);
+      const context = new EventEmitter();
+      context.pages = () => [];
+      context.newPage = async () => ({
+        url: () => "about:blank",
+        goto: async () => {},
+        bringToFront: async () => {},
+        close: async () => {},
+      });
+      context.close = async () => context.emit("close");
+      return context;
+    },
+  });
+
+  const session = await manager.createTaskSession("instagram", "silent-task");
+  assert.equal(launches[0].headless, true);
+  await session.close();
+  await manager.openLogin("instagram");
+  assert.equal(launches[1].headless, false);
+});

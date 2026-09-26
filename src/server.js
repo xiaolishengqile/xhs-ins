@@ -1,5 +1,5 @@
 import { mkdir } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -14,17 +14,18 @@ import { TaskManager } from "./tasks/task-manager.js";
 import { TaskStore } from "./tasks/task-store.js";
 import { SchedulerStateStore } from "./tasks/scheduler-state-store.js";
 import { ApplicationController } from "./application/controller.js";
+import { PreferencesStore } from "./application/preferences-store.js";
+import { defaultPicturesDirectory } from "./system/pictures-directory.js";
 
 function defaultDataDir() {
   return process.env.VERCEL === "1" ? path.join(tmpdir(), "xhs-ins") : path.resolve(".data");
 }
 
-function defaultOutputDir() {
-  return path.join(homedir(), "Pictures", "博主图片采集");
-}
-
-export async function createRuntime({ dataDir = defaultDataDir(), outputDir = defaultOutputDir() } = {}) {
+export async function createRuntime({ dataDir = defaultDataDir(), outputDir } = {}) {
   await mkdir(dataDir, { recursive: true });
+  const preferencesStore = new PreferencesStore(dataDir);
+  const preferredOutputDir = (await preferencesStore.load()).outputDir;
+  outputDir ??= preferredOutputDir || await defaultPicturesDirectory();
   const store = new TaskStore(path.join(dataDir, "tasks"));
   const controlStore = new SchedulerStateStore(path.join(dataDir, "scheduler.json"));
   const browserManager = new BrowserManager({ profilesDir: path.join(dataDir, "browser-profiles") });
@@ -52,7 +53,7 @@ export async function createRuntime({ dataDir = defaultDataDir(), outputDir = de
     },
   });
   await manager.init();
-  const controller = new ApplicationController({ manager, browserManager, outputDir });
+  const controller = new ApplicationController({ manager, browserManager, outputDir, dataDir, preferencesStore });
   return {
     manager,
     browserManager,
@@ -76,12 +77,16 @@ export default async function handleCloudRequest(request, response) {
 
 export async function main() {
   const runtime = await createRuntime();
-  const instance = await startServer({ handler: createApp({ manager: runtime.manager, controller: runtime.controller }) });
-  console.log(`博主图片采集工具已启动：${instance.url}`);
+  let instance;
   const shutdown = async () => {
     await instance.close();
     await runtime.close();
   };
+  instance = await startServer({ handler: createApp({
+    manager: runtime.manager, controller: runtime.controller,
+    requestStop: () => shutdown().then(() => process.exit(0)),
+  }) });
+  console.log(`博主图片采集工具已启动：${instance.url}`);
   process.once("SIGINT", () => shutdown().finally(() => process.exit(0)));
   process.once("SIGTERM", () => shutdown().finally(() => process.exit(0)));
   return { ...instance, runtime };

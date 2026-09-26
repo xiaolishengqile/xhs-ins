@@ -462,6 +462,14 @@ elements.deleteSelected.addEventListener("click", async () => {
   }
 });
 
+document.addEventListener("settings-changed", (event) => {
+  elements.preset.value = event.detail.preset;
+  elements.preset.dispatchEvent(new Event("change"));
+});
+try {
+  const settings = await request("/api/settings");
+  elements.preset.value = settings.preset;
+} catch { /* 设置不可用时沿用页面默认的一年。 */ }
 await refresh();
 setInterval(() => {
   if (document.visibilityState !== "visible" || refreshPromise) return;

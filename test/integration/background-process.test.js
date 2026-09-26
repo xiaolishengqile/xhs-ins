@@ -93,6 +93,24 @@ test("后台进程就绪后可查询，重复启动复用实例，并能经过�
   assert.equal(parse((await run(["stop", ...common], { reject: true })).stdout).stopped, true);
 });
 
+test("网页安全停止接口会在响应后关闭隔离后台并释放实例锁", async (t) => {
+  const { dataDir, common } = await fixture(t);
+  const started = parse((await run(["start", ...common, "--port", "0"], { reject: true })).stdout);
+  const response = await fetch(`${started.url}/api/control/stop`, { method: "POST" });
+  assert.equal(response.status, 202);
+  assert.deepEqual(await response.json(), { stopping: true });
+
+  let stopped = false;
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    const status = await run(["status", ...common]);
+    if (status.code !== 0) { stopped = true; break; }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.equal(stopped, true);
+  const restarted = parse((await run(["start", ...common, "--port", "0"], { reject: true })).stdout);
+  assert.notEqual(restarted.pid, started.pid);
+});
+
 test("后台状态返回临时数据目录和与运行时一致的默认图片目录", async (t) => {
   const { dataDir } = await fixture(t);
   const common = ["--data-dir", dataDir];
@@ -100,7 +118,12 @@ test("后台状态返回临时数据目录和与运行时一致的默认图片�
   const status = parse((await run(["start", ...common, "--port", "0"], { reject: true })).stdout);
 
   assert.equal(status.dataDir, path.resolve(dataDir));
-  assert.equal(status.outputDir, path.join(homedir(), "Pictures", "博主图片采集"));
+  if (process.platform === "win32") {
+    assert.equal(path.isAbsolute(status.outputDir), true);
+    assert.equal(path.basename(status.outputDir), "博主图片采集");
+  } else {
+    assert.equal(status.outputDir, path.join(homedir(), "Pictures", "博主图片采集"));
+  }
 });
 
 test("控制通道拒绝错误实例凭证且不会停止后台", async (t) => {

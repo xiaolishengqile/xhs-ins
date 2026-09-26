@@ -1,7 +1,7 @@
 ﻿param(
   [Parameter(Mandatory = $true)][string]$ProjectRoot,
   [string]$DataDir = (Join-Path $ProjectRoot ".data"),
-  [string]$OutputDir = (Join-Path ([Environment]::GetFolderPath("MyPictures")) "博主图片采集"),
+  [string]$OutputDir = "",
   [int]$Port = 4310
 )
 
@@ -18,9 +18,10 @@ $wscript = Join-Path $env:SystemRoot "System32\wscript.exe"
 $arguments = @(
   $launcher,
   "-DataDir", $DataDir,
-  "-OutputDir", $OutputDir,
   "-Port", "$Port"
-) | ForEach-Object { Quote-ShortcutArgument $_ }
+)
+if ($OutputDir) { $arguments += @("-OutputDir", $OutputDir) }
+$arguments = $arguments | ForEach-Object { Quote-ShortcutArgument $_ }
 
 $shell = New-Object -ComObject WScript.Shell
 $shortcut = $shell.CreateShortcut($shortcutPath)

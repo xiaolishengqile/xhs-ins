@@ -57,13 +57,11 @@ function launchFailure(error) {
 export class BrowserManager {
   constructor({
     profilesDir,
-    headless = process.env.COLLECTOR_HEADLESS !== "0",
     idleTimeoutMs = 120_000,
     browserLaunchOptions = resolveSystemBrowserLaunchOptions,
     launchPersistentContext = (directory, options) => chromium.launchPersistentContext(directory, options),
   }) {
     this.profilesDir = path.resolve(profilesDir);
-    this.headless = headless;
     this.idleTimeoutMs = idleTimeoutMs;
     this.idleTimers = new Map();
     this.closingContexts = new Map();
@@ -179,7 +177,7 @@ export class BrowserManager {
   async #launch(platform) {
     const { context, prepared: keepalivePage } = await this.#launchPersistent(
       platform,
-      this.headless,
+      true,
       async (candidate) => (candidate.pages?.() ?? []).find((page) => page.url?.() === "about:blank")
         ?? candidate.newPage(),
     );
@@ -245,7 +243,7 @@ export class BrowserManager {
     for (const browserOptions of browserLaunchOptions) {
       let context;
       try {
-        context = await this.launchPersistentContext(profileDir, { ...options, ...browserOptions });
+        context = await this.launchPersistentContext(profileDir, { ...browserOptions, ...options });
         const prepared = await prepare(context);
         return { context, prepared };
       } catch (error) {

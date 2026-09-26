@@ -109,7 +109,11 @@ export async function runWorker(argv = process.argv.slice(2)) {
       port: options.port,
     });
     runtime = await createRuntime({ dataDir: options.dataDir, outputDir: options.outputDir });
-    appHandler = createApp({ manager: runtime.manager, controller: runtime.controller });
+    appHandler = createApp({
+      manager: runtime.manager,
+      controller: runtime.controller,
+      requestStop: () => stopResources().then(() => finishExit(0)),
+    });
     const baseStatus = {
       running: true,
       pid: process.pid,

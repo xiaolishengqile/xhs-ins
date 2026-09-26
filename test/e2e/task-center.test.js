@@ -1,11 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { chromium } from "playwright";
+import sharp from "sharp";
 
 import { ApplicationController } from "../../src/application/controller.js";
+import { PreferencesStore } from "../../src/application/preferences-store.js";
 import { LoginRequiredError, PlatformTemporarilyUnavailableError } from "../../src/collectors/errors.js";
 import { BrowserLaunchError } from "../../src/browser/errors.js";
 import { createApp } from "../../src/http/app.js";
@@ -38,11 +40,13 @@ async function fixture(
   const controller = new ApplicationController({
     manager,
     browserManager,
+    dataDir: rootDir,
+    preferencesStore: new PreferencesStore(rootDir),
     outputDir: path.join(rootDir, "output"),
     ensureDir: async () => {},
     openPath: async (directory) => events.push(`open-output:${directory}`),
   });
-  const instance = await startServer({ handler: createApp({ manager, controller }), port: 0 });
+  const instance = await startServer({ handler: createApp({ manager, controller, requestStop: () => events.push("stop-backend") }), port: 0 });
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage();
   page.setDefaultTimeout(4_000);
@@ -226,6 +230,53 @@ test("页面只提供打开图片文件夹，不提供结果下载", async (t) =
   await page.getByRole("button", { name: "打开图片文件夹" }).click();
 
   assert.deepEqual(events, [`open-output:${outputDir}`]);
+});
+
+test("本机网页可浏览本地原图、保存下次启动设置并安全停止", async (t) => {
+  const { page, events, outputDir, url } = await fixture(t);
+  const accountDir = path.join(outputDir, "示例账号");
+  await mkdir(accountDir, { recursive: true });
+  await writeFile(path.join(accountDir, "横图.png"), await sharp({
+    create: { width: 400, height: 200, channels: 3, background: "#3388aa" },
+  }).png().toBuffer());
+
+  await page.goto(url);
+  await page.getByRole("button", { name: "图片", exact: true }).click();
+  await page.getByText("横图.png").waitFor();
+  await page.getByRole("button", { name: /查看横图.png/ }).click();
+  await page.getByText("400 × 200").waitFor();
+  await page.getByRole("button", { name: "原始比例" }).click();
+  assert.equal(await page.locator("#viewer-image").evaluate((image) => image.style.width), "400px");
+  await page.getByRole("button", { name: "放大" }).click();
+  await page.getByRole("button", { name: "原始比例" }).click();
+  assert.equal(await page.locator("#viewer-image").evaluate((image) => image.style.width), "400px");
+  await page.getByRole("button", { name: "打开所在文件夹" }).click();
+  await eventually(() => assert.ok(events.includes(`open-output:${accountDir}`)));
+  await page.getByRole("button", { name: "关闭预览" }).click();
+
+  await page.getByRole("button", { name: "设置", exact: true }).click();
+  await page.getByText(outputDir, { exact: true }).waitFor();
+  assert.equal(await page.locator("#actual-output-dir").textContent(), outputDir);
+  await page.getByLabel("下次启动图片目录").fill(path.join(path.dirname(outputDir), "新目录"));
+  await page.getByLabel("默认采集周期").selectOption("month");
+  await page.getByRole("button", { name: "保存设置" }).click();
+  await page.getByText("设置已保存；图片目录将在下次启动后台时生效。", { exact: true }).waitFor();
+
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "安全停止后台" }).click();
+  await page.getByText("后台正在安全停止", { exact: false }).waitFor();
+  assert.ok(events.includes("stop-backend"));
+});
+
+test("损坏的本地图片在网页列表中明确提示无法预览", async (t) => {
+  const { page, outputDir, url } = await fixture(t);
+  const accountDir = path.join(outputDir, "损坏账号");
+  await mkdir(accountDir, { recursive: true });
+  await writeFile(path.join(accountDir, "坏图.png"), "not an image");
+  await page.goto(url);
+  await page.getByRole("button", { name: "图片", exact: true }).click();
+  await page.getByText("坏图.png").waitFor();
+  await page.getByText("无法预览", { exact: true }).waitFor();
 });
 
 test("没有运行任务时不会持续轮询任务列表", async (t) => {

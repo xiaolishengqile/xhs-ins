@@ -10,11 +10,17 @@
   <body>
     <div class="page-shell">
       <header class="hero">
-        <p class="eyebrow">本地私有工具</p>
+        <p class="eyebrow">本地私有工具 · 采图台</p>
         <p class="hero-copy">先整理任务，再按需开始。低占用模式每次静默采集 1 位博主，关闭页面后继续运行。</p>
       </header>
 
-      <main>
+      <nav class="main-navigation" aria-label="主导航">
+        <button type="button" data-view="tasks" aria-pressed="true">任务</button>
+        <button type="button" data-view="images" aria-pressed="false">图片</button>
+        <button type="button" data-view="settings" aria-pressed="false">设置</button>
+      </nav>
+
+      <main id="tasks-view">
         <section class="panel create-panel" aria-labelledby="create-title">
           <div class="section-heading">
             <div>
@@ -140,10 +146,68 @@
         </section>
       </main>
 
+      <main id="images-view" hidden>
+        <section class="panel" aria-labelledby="images-title">
+          <div class="section-heading">
+            <div><p class="section-index">01</p><h2 id="images-title">本地图片</h2></div>
+            <button id="refresh-images" class="task-action" type="button">刷新图片</button>
+          </div>
+          <p class="section-help">浏览已下载到电脑的图片。采集时仍会保存到当前后台图片目录。</p>
+          <label class="field image-account-field"><span>博主账号</span><select id="image-account"></select></label>
+          <p id="images-message" class="form-message" role="status" aria-live="polite"></p>
+          <div id="image-grid" class="image-grid"></div>
+          <nav id="image-pagination" class="bulk-actions" aria-label="图片分页" hidden>
+            <button id="image-previous" class="task-action" type="button">上一页</button>
+            <span id="image-page-label"></span>
+            <button id="image-next" class="task-action" type="button">下一页</button>
+          </nav>
+        </section>
+        <dialog id="image-viewer" class="image-viewer" aria-label="图片预览">
+          <div class="viewer-toolbar">
+            <strong id="viewer-name"></strong>
+            <span id="viewer-size"></span>
+            <button id="viewer-fit" class="task-action" type="button">适应窗口</button>
+            <button id="viewer-original" class="task-action" type="button">原始比例</button>
+            <button id="viewer-smaller" class="task-action" type="button">缩小</button>
+            <button id="viewer-larger" class="task-action" type="button">放大</button>
+            <button id="viewer-open-folder" class="task-action" type="button">打开所在文件夹</button>
+            <button id="viewer-close" class="task-action" type="button">关闭预览</button>
+          </div>
+          <div class="viewer-canvas"><img id="viewer-image" alt="本地图片预览" /></div>
+        </dialog>
+      </main>
+
+      <main id="settings-view" hidden>
+        <section class="panel" aria-labelledby="settings-title">
+          <div class="section-heading"><div><p class="section-index">01</p><h2 id="settings-title">采集设置</h2></div></div>
+          <dl class="settings-status">
+            <div><dt>后台版本</dt><dd id="node-version">读取中…</dd></div>
+            <div><dt>数据目录</dt><dd id="data-dir">读取中…</dd></div>
+            <div><dt>当前图片目录</dt><dd id="actual-output-dir">读取中…</dd></div>
+          </dl>
+          <form id="settings-form" class="settings-form">
+            <label class="field"><span>默认采集周期</span>
+              <select id="default-preset"><option value="week">最近一周</option><option value="month">最近一个月</option><option value="halfYear">最近半年</option><option value="year">最近一年</option></select>
+            </label>
+            <label class="field"><span>下次启动图片目录</span><input id="preferred-output-dir" type="text" placeholder="留空使用默认图片目录" /></label>
+            <p class="section-help">更改图片目录后，安全停止后台并重新启动才会生效；已有图片不会移动。</p>
+            <button class="primary-button" type="submit">保存设置</button>
+          </form>
+          <p id="settings-message" class="form-message" role="status" aria-live="polite"></p>
+        </section>
+        <section class="panel maintenance-panel" aria-labelledby="maintenance-title">
+          <h2 id="maintenance-title">后台控制</h2>
+          <p>关闭这个网页不会停止采集。需要完全退出时，请先安全停止后台。</p>
+          <button id="stop-backend" class="task-action task-action-danger" type="button">安全停止后台</button>
+          <p id="stop-message" class="form-message" role="status" aria-live="polite"></p>
+        </section>
+      </main>
+
       <footer>
         仅采集公开图文中的图片，视频会被过滤。删除任务不会删除已经保存到图片文件夹的图片。
       </footer>
     </div>
     <script type="module" src="/app.js"></script>
+    <script type="module" src="/navigation.js"></script>
   </body>
 </html>

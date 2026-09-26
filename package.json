@@ -7,6 +7,7 @@
     "node": ">=22.0.0"
   },
   "scripts": {
+    "web": "node scripts/open-web.js",
     "start": "node src/server.js",
     "background:start": "node scripts/background.js start",
     "background:status": "node scripts/background.js status",
@@ -21,6 +22,7 @@
   },
   "dependencies": {
     "playwright": "1.62.1",
+    "sharp": "0.35.4",
     "yazl": "3.3.1"
   }
 }

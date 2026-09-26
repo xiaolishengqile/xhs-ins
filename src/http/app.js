@@ -4,12 +4,17 @@ import { fileURLToPath } from "node:url";
 
 import { readBuffer, readJson } from "./body.js";
 import { extractLinkEntriesFromFile } from "../import/link-file.js";
+import { LocalImageLibrary } from "../images/local-image-library.js";
 import builtinProfiles from "../data/builtin-profiles.json" with { type: "json" };
 
 const DEFAULT_PUBLIC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../public");
 const STATIC_FILES = new Map([
   ["/", ["index.html", "text/html; charset=utf-8"]],
   ["/app.js", ["app.js", "text/javascript; charset=utf-8"]],
+  ["/api.js", ["api.js", "text/javascript; charset=utf-8"]],
+  ["/images.js", ["images.js", "text/javascript; charset=utf-8"]],
+  ["/settings.js", ["settings.js", "text/javascript; charset=utf-8"]],
+  ["/navigation.js", ["navigation.js", "text/javascript; charset=utf-8"]],
   ["/styles.css", ["styles.css", "text/css; charset=utf-8"]],
 ]);
 
@@ -22,6 +27,16 @@ function sendJson(response, statusCode, value) {
     "x-content-type-options": "nosniff",
   });
   response.end(body);
+}
+
+function sendImage(response, image) {
+  response.writeHead(200, {
+    "content-type": image.contentType,
+    "content-length": image.body.length,
+    "cache-control": "no-store",
+    "x-content-type-options": "nosniff",
+  });
+  response.end(image.body);
 }
 
 function statusForError(error) {
@@ -50,9 +65,15 @@ async function sendStatic(response, publicDir, pathname) {
   return true;
 }
 
-async function handleRequest(request, response, { manager, controller, publicDir }) {
+async function handleRequest(request, response, { manager, controller, publicDir, imageLibrary, requestStop }) {
   const url = new URL(request.url, "http://127.0.0.1");
   const { pathname } = url;
+  let localHost = false;
+  try {
+    const host = new URL(`http://${request.headers.host}`).hostname;
+    localHost = ["127.0.0.1", "localhost", "[::1]"].includes(host);
+  } catch { /* 非法主机名不能访问本机图片和控制接口。 */ }
+  if (!localHost) return sendJson(response, 403, { error: "仅允许本机访问" });
   if (!["GET", "HEAD", "OPTIONS"].includes(request.method) && request.headers.origin) {
     let sameOrigin = false;
     try {
@@ -74,6 +95,27 @@ async function handleRequest(request, response, { manager, controller, publicDir
   if (request.method === "GET" && pathname === "/api/control") {
     return sendJson(response, 200, manager.controlStatus());
   }
+  if (request.method === "GET" && pathname === "/api/images/accounts") {
+    return sendJson(response, 200, { accounts: await imageLibrary.accounts() });
+  }
+  if (request.method === "GET" && pathname === "/api/images") {
+    return sendJson(response, 200, await imageLibrary.list(url.searchParams.get("account"), Number(url.searchParams.get("page") ?? 1)));
+  }
+  if (request.method === "GET" && pathname === "/api/images/file") {
+    return sendImage(response, await imageLibrary.read(
+      url.searchParams.get("account"), url.searchParams.get("name"), url.searchParams.get("size") ?? "original",
+    ));
+  }
+  if (request.method === "POST" && pathname === "/api/images/open-folder") {
+    const { account } = await readJson(request);
+    return sendJson(response, 200, await controller.openImageDirectory(await imageLibrary.directory(account)));
+  }
+  if (request.method === "GET" && pathname === "/api/settings") {
+    return sendJson(response, 200, await controller.settings());
+  }
+  if (request.method === "PUT" && pathname === "/api/settings") {
+    return sendJson(response, 200, await controller.saveSettings(await readJson(request)));
+  }
   if (request.method === "POST" && pathname === "/api/link-files/parse") {
     let fileName;
     try {
@@ -94,6 +136,11 @@ async function handleRequest(request, response, { manager, controller, publicDir
   }
   if (request.method === "POST" && pathname === "/api/control/resume") {
     return sendJson(response, 200, await controller.resumeAll());
+  }
+  if (request.method === "POST" && pathname === "/api/control/stop" && requestStop) {
+    sendJson(response, 202, { stopping: true });
+    setImmediate(() => { void Promise.resolve().then(requestStop).catch(console.error); });
+    return;
   }
   if (request.method === "POST" && pathname === "/api/output/open") {
     return sendJson(response, 200, await controller.openOutputDirectory());
@@ -140,9 +187,9 @@ async function handleRequest(request, response, { manager, controller, publicDir
   sendJson(response, 404, { error: "请求地址不存在" });
 }
 
-export function createApp({ manager, controller = manager, publicDir = DEFAULT_PUBLIC_DIR }) {
+export function createApp({ manager, controller = manager, publicDir = DEFAULT_PUBLIC_DIR, imageLibrary = new LocalImageLibrary(controller.outputDir), requestStop }) {
   return (request, response) => {
-    handleRequest(request, response, { manager, controller, publicDir }).catch((error) => {
+    handleRequest(request, response, { manager, controller, publicDir, imageLibrary, requestStop }).catch((error) => {
       if (!response.headersSent) sendJson(response, statusForError(error), { error: error.message || "请求失败" });
       else response.destroy(error);
     });
