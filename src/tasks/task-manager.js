@@ -74,6 +74,10 @@ export class TaskManager {
     this.paused = false;
     this.storageError = null;
     this.closed = false;
+    this.throttle = { imageDelayMs: 0, bloggerGapMs: 0, dailyLimit: 0 };
+    this.lastRunFinishedAt = 0;
+    this.throttleWait = null;
+    this.throttleTimer = null;
     this.platformCooldowns = new PlatformCooldowns({
       store: this.controlStore,
       now: this.now,
@@ -139,15 +143,22 @@ export class TaskManager {
     return clone(task);
   }
 
-  async start(id) {
+  async start(id, range) {
     if (this.closed) throw new Error("任务管理器已关闭");
     if (this.paused) throw new Error("调度器已暂停，请先继续调度");
     const task = this.#requireTask(id);
     if (task.status !== TASK_STATUS.PENDING) throw new Error("只有待开始任务可以启动");
+    if (range) {
+      const resolved = resolveDateRange(range, this.now());
+      task.from = resolved.from;
+      task.to = resolved.to;
+      task.updatedAt = this.now().toISOString();
+      await this.#saveTask(task);
+    }
     return this.#requeue(task, "等待采集");
   }
 
-  async startBatch(ids) {
+  async startBatch(ids, range) {
     if (!Array.isArray(ids)) throw new Error("任务编号必须是数组");
     if (this.paused) throw new Error("调度器已暂停，请先继续调度");
     const started = [];
@@ -158,7 +169,7 @@ export class TaskManager {
         skipped.push(id);
         continue;
       }
-      await this.start(id);
+      await this.start(id, range);
       started.push(id);
     }
     return { started, skipped };
@@ -168,11 +179,26 @@ export class TaskManager {
     if (this.closed) throw new Error("任务管理器已关闭");
     resolveDateRange(range, this.now());
     const normalized = normalizeBatchEntries(entries);
+    const existing = new Set();
+    for (const task of this.tasks.values()) {
+      try {
+        existing.add(normalizeProfileUrl(task.profileUrl).url);
+      } catch {
+        if (task.profileUrl) existing.add(task.profileUrl);
+      }
+    }
     const tasks = [];
+    let duplicates = normalized.duplicates;
     for (const entry of normalized.valid) {
+      if (existing.has(entry.url)) {
+        duplicates += 1;
+        continue;
+      }
+      existing.add(entry.url);
       try {
         tasks.push(await this.create({ url: entry.url, range }));
       } catch (error) {
+        existing.delete(entry.url);
         normalized.rejected.push({
           line: entry.line,
           url: entry.url,
@@ -183,7 +209,7 @@ export class TaskManager {
     return {
       tasks,
       rejected: normalized.rejected,
-      duplicates: normalized.duplicates,
+      duplicates,
     };
   }
 
@@ -215,7 +241,13 @@ export class TaskManager {
         message: block.message,
       })),
       cooldowns: this.platformCooldowns.values(),
+      throttleWait: this.throttleWait,
     };
+  }
+
+  setThrottle(values) {
+    Object.assign(this.throttle, values);
+    this.#requestSchedule();
   }
 
   async pauseAll() {
@@ -313,14 +345,52 @@ export class TaskManager {
     return this.#requeue(task, "等待重试");
   }
 
-  async update(id) {
+  async update(id, range) {
     if (this.closed) throw new Error("任务管理器已关闭");
     if (this.paused) throw new Error("调度器已暂停，请先继续调度");
     const task = this.#requireTask(id);
     if (![TASK_STATUS.COMPLETED, TASK_STATUS.PARTIAL].includes(task.status)) throw new Error("只有已完成或部分完成任务可以采集新增");
-    const range = resolveDateRange({ preset: "year" }, this.now());
-    Object.assign(task, { to: range.to, completedAt: null, recoveryAttempts: 0, refreshRequested: true });
+    const resolved = resolveDateRange(range ?? { preset: "year" }, this.now());
+    Object.assign(task, {
+      from: range ? resolved.from : task.from,
+      to: resolved.to,
+      completedAt: null,
+      recoveryAttempts: 0,
+      refreshRequested: true,
+    });
     return this.#requeue(task, "等待采集新增");
+  }
+
+  async runBatch(action, ids, range) {
+    if (!["recollect", "update"].includes(action)) throw new Error("不支持的批量操作");
+    if (!Array.isArray(ids)) throw new Error("任务编号必须是数组");
+    const started = [];
+    const skipped = [];
+    for (const id of new Set(ids)) {
+      try {
+        await this[action](id, range);
+        started.push(id);
+      } catch (error) {
+        if (this.paused || this.storageError) throw error;
+        skipped.push({ id, reason: errorMessage(error) });
+      }
+    }
+    return { started, skipped };
+  }
+
+  async recollect(id, range) {
+    if (this.closed) throw new Error("任务管理器已关闭");
+    if (this.paused) throw new Error("调度器已暂停，请先继续调度");
+    const task = this.#requireTask(id);
+    const resolved = range ? resolveDateRange(range, this.now()) : null;
+    this.queue = this.queue.filter((queuedId) => queuedId !== id);
+    this.running.get(id)?.abort();
+    const runningPromise = this.taskRuns.get(id);
+    if (runningPromise) await Promise.allSettled([runningPromise]);
+    if (resolved) Object.assign(task, { from: resolved.from, to: resolved.to });
+    await this.#persistStorage(() => new CollectionCheckpoint(this.store.taskDir(id)).reset());
+    Object.assign(task, { completedAt: null, recoveryAttempts: 0, refreshRequested: false });
+    return this.#requeue(task, "等待重新采集");
   }
 
   async resume(id) {
@@ -379,6 +449,7 @@ export class TaskManager {
 
   async shutdown() {
     this.closed = true;
+    clearTimeout(this.throttleTimer);
     this.platformCooldowns.close();
     for (const [id, controller] of this.running) {
       if (this.tasks.get(id)?.status !== TASK_STATUS.CANCELLED) this.pauseRequested.add(id);
@@ -419,18 +490,57 @@ export class TaskManager {
     queueMicrotask(() => this.#schedule());
   }
 
+  #throttleDelay(candidate) {
+    const now = this.now().getTime();
+    const { bloggerGapMs, dailyLimit } = this.throttle;
+    const today = this.now().toDateString();
+    const candidateRanToday = candidate?.lastRunAt && new Date(candidate.lastRunAt).toDateString() === today;
+    if (dailyLimit > 0 && !candidateRanToday) {
+      const startedToday = [...this.tasks.values()]
+        .filter((task) => task.lastRunAt && new Date(task.lastRunAt).toDateString() === today).length;
+      if (startedToday >= dailyLimit) {
+        const midnight = new Date(this.now());
+        midnight.setHours(24, 0, 0, 0);
+        return { reason: "daily", until: midnight.getTime() };
+      }
+    }
+    if (bloggerGapMs > 0 && this.running.size === 0 && this.lastRunFinishedAt) {
+      const until = this.lastRunFinishedAt + bloggerGapMs;
+      if (until > now) return { reason: "gap", until };
+    }
+    return null;
+  }
+
   #schedule() {
+    clearTimeout(this.throttleTimer);
+    this.throttleTimer = null;
+    this.throttleWait = null;
     if (this.closed || this.paused || this.storageError) return;
     this.platformCooldowns.refresh();
     while (this.running.size < this.maxConcurrency && this.queue.length > 0) {
-      const runnableIndex = this.queue.findIndex((id) => {
-        const task = this.tasks.get(id);
-        return task?.status === TASK_STATUS.QUEUED
-          && !this.platformBlocks.has(task.platform)
-          && !this.platformCooldowns.has(task.platform)
-          && this.#runningCount(task.platform) < (this.platformConcurrency[task.platform] ?? this.maxConcurrency);
-      });
+      let runnableIndex = -1;
+      let delay = null;
+      for (const [index, id] of this.queue.entries()) {
+        const candidate = this.tasks.get(id);
+        const runnable = candidate?.status === TASK_STATUS.QUEUED
+          && !this.platformBlocks.has(candidate.platform)
+          && !this.platformCooldowns.has(candidate.platform)
+          && this.#runningCount(candidate.platform) < (this.platformConcurrency[candidate.platform] ?? this.maxConcurrency);
+        if (!runnable) continue;
+        const candidateDelay = this.#throttleDelay(candidate);
+        if (!candidateDelay) {
+          runnableIndex = index;
+          break;
+        }
+        delay ??= candidateDelay;
+      }
       if (runnableIndex < 0) {
+        if (delay) {
+          this.throttleWait = { reason: delay.reason, until: new Date(delay.until).toISOString() };
+          const wait = Math.min(Math.max(delay.until - this.now().getTime(), 1_000), 2_147_000_000);
+          this.throttleTimer = setTimeout(() => this.#requestSchedule(), wait);
+          this.throttleTimer.unref?.();
+        }
         return;
       }
       const [id] = this.queue.splice(runnableIndex, 1);
@@ -463,6 +573,7 @@ export class TaskManager {
     task.status = TASK_STATUS.RUNNING;
     task.error = null;
     task.startedAt = task.startedAt ?? this.now().toISOString();
+    task.lastRunAt = this.now().toISOString();
     task.updatedAt = this.now().toISOString();
     task.progress.stage = "正在采集";
     const onProgress = async (progress) => {
@@ -508,7 +619,9 @@ export class TaskManager {
       task.status = incomplete > 0 ? TASK_STATUS.PARTIAL : TASK_STATUS.COMPLETED;
       task.progress.stage = incomplete > 0 ? `部分完成，${incomplete} 张图片需重试` : task.warningCount > 0
         ? `采集完成，跳过 ${task.warningCount} 篇不可访问帖子`
-        : "采集完成";
+        : (result.notes?.length ?? 0) === 0
+          ? "采集完成，区间内没有图文帖子"
+          : "采集完成";
       task.completedAt = this.now().toISOString();
       task.recoveryAttempts = 0;
     } catch (error) {
@@ -569,6 +682,7 @@ export class TaskManager {
       this.taskInterruptions.delete(task.id);
       task.updatedAt = this.now().toISOString();
       this.running.delete(task.id);
+      this.lastRunFinishedAt = this.now().getTime();
       try {
         await this.#saveTask(task);
       } catch { /* 故障已进入 controlStatus，等待用户明确继续。 */ }
@@ -603,7 +717,7 @@ export class TaskManager {
       return;
     }
     task.resultPath = saved.directory;
-    for (const key of ["imagesDownloaded", "imagesAvailable", "imagesFailed", "imagesSkipped", "imagesUpgradeFailed", "previewImages"]) {
+    for (const key of ["imagesDownloaded", "imagesAvailable", "imagesFailed", "imagesSkipped", "imagesUpgradeFailed", "imagesExcluded", "previewImages"]) {
       task.progress[key] = saved[key] ?? 0;
     }
     await this.#persistStorage(() => checkpoint.invalidate(saved.notes ?? []));

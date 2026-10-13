@@ -4,6 +4,14 @@ import path from "node:path";
 
 import { openPath as openSystemPath } from "../system/open-path.js";
 
+export function throttleFrom(preferences) {
+  return {
+    imageDelayMs: Math.round(preferences.imageDelaySeconds * 1000),
+    bloggerGapMs: Math.round(preferences.bloggerGapSeconds * 1000),
+    dailyLimit: preferences.dailyBloggerLimit,
+  };
+}
+
 export class ApplicationController {
   constructor({
     manager,
@@ -25,14 +33,14 @@ export class ApplicationController {
     this.isCloud = isCloud;
   }
 
-  async start(taskId) {
+  async start(taskId, range) {
     this.#assertLocal();
-    return this.manager.start(taskId);
+    return this.manager.start(taskId, range);
   }
 
-  async startBatch(ids) {
+  async startBatch(ids, range) {
     this.#assertLocal();
-    return this.manager.startBatch(ids);
+    return this.manager.startBatch(ids, range);
   }
 
   async pauseAll() {
@@ -88,7 +96,8 @@ export class ApplicationController {
   }
 
   async saveSettings(input) {
-    await this.preferencesStore.save(input);
+    const saved = await this.preferencesStore.save(input);
+    this.manager.setThrottle?.(throttleFrom(saved));
     return this.settings();
   }
 

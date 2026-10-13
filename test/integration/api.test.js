@@ -297,6 +297,7 @@ test("控制接口可以幂等暂停和继续调度器", async (t) => {
     blockedPlatforms: [],
     platformBlocks: [],
     cooldowns: {},
+    throttleWait: null,
   });
 
   const paused = await json(await fetch(`${url}/api/control/pause`, { method: "POST" }));

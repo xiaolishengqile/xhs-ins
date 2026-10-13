@@ -4,8 +4,10 @@ import {
   VerificationRequiredError,
 } from "../errors.js";
 import { navigateWithRetry } from "../navigation.js";
-import { parseInstagramPostHtml } from "./parser.js";
-import { selectLargestImageCandidates } from "./image-candidates.js";
+import { normalizeNote } from "../../domain/note.js";
+
+const IMAGE = 1;
+const CAROUSEL = 8;
 
 function throwIfAborted(signal) {
   if (signal.aborted) throw new DOMException("已取消", "AbortError");
@@ -17,104 +19,76 @@ function checkPageText(text, requireLogin = false) {
   if (requireLogin && /log in|sign up|登录|注册/i.test(text)) throw new LoginRequiredError();
 }
 
-function normalizedPostUrl(value) {
-  try {
-    const url = new URL(value, "https://www.instagram.com/");
-    if (url.protocol !== "https:" || !["instagram.com", "www.instagram.com"].includes(url.hostname)) return null;
-    const match = url.pathname.match(/^\/(?:[^/]+\/)?p\/([^/]+)\/?/);
-    return match ? `https://www.instagram.com/p/${match[1]}/` : null;
-  } catch {
-    return null;
+function belongsTo(post, profileKey) {
+  const owner = String(post?.user?.username ?? post?.owner?.username ?? "").toLowerCase();
+  if (owner === profileKey) return true;
+  return (post?.coauthor_producers ?? []).some((user) => String(user?.username ?? "").toLowerCase() === profileKey);
+}
+
+function largestCandidate(media) {
+  let best = null;
+  for (const candidate of media?.image_versions2?.candidates ?? []) {
+    if (!candidate?.url) continue;
+    const area = Number(candidate.width ?? 0) * Number(candidate.height ?? 0);
+    if (!best || area > best.area) best = { ...candidate, area };
   }
+  return best;
 }
 
-function isInRange(value, from, to) {
-  if (!value) return false;
-  const time = new Date(value).getTime();
-  return time >= new Date(from).getTime() && time <= new Date(to).getTime();
-}
-
-function mergeVisibleImages(note, images, hasVideo) {
-  const visible = selectLargestImageCandidates(images);
-  const selected = visible.length > 0
-    ? visible
-    : hasVideo
-      ? []
-      : note.media.map((item) => ({ url: item.url, width: 0, height: null }));
-  note.media = selected.map((item) => ({
-    url: item.url,
+export function noteFromFeedPost(post, profileKey) {
+  const items = post.media_type === CAROUSEL ? post.carousel_media ?? [] : [post];
+  const images = items.filter((item) => item?.media_type === IMAGE).map(largestCandidate).filter(Boolean);
+  const note = normalizeNote({
+    platform: "instagram",
+    id: post.code,
+    type: images.length > 0 ? "image" : "video",
+    author: post.user?.username ?? profileKey,
+    title: post.caption?.text ?? "",
+    publishedAt: post.taken_at * 1000,
+    url: `https://www.instagram.com/p/${post.code}/`,
+    metrics: {
+      likeCount: post.like_and_view_counts_disabled ? null : post.like_count ?? null,
+      favoriteCount: null,
+      commentCount: post.comment_count ?? null,
+    },
+    media: [],
+  });
+  note.media = images.map((candidate) => ({
+    url: candidate.url,
     type: "image",
     localPath: null,
     error: null,
-    sourceWidth: item.width || null,
-    sourceHeight: item.height,
+    sourceWidth: candidate.width ?? null,
+    sourceHeight: candidate.height ?? null,
   }));
   return note;
 }
 
-function imageSnapshotKey(image) {
-  if (typeof image === "string") return image;
-  return [image?.src, image?.currentSrc, image?.srcset, image?.naturalWidth, image?.naturalHeight].join("\u0000");
+export function readFeedPayload(payload, profileKey, posts, state) {
+  const visit = (value) => {
+    if (!value || typeof value !== "object") return;
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item);
+      return;
+    }
+    if (Array.isArray(value.edges) && value.page_info && value.edges.some((edge) => belongsTo(edge?.node, profileKey))) {
+      state.pageInfo = value.page_info;
+    }
+    if (typeof value.code === "string" && value.taken_at) {
+      if (belongsTo(value, profileKey)) posts.set(value.code, value);
+      return;
+    }
+    for (const child of Object.values(value)) visit(child);
+  };
+  visit(payload);
 }
 
-async function readProfileSnapshot(page, signal) {
-  let snapshot = { links: [], bodyText: "" };
-  for (let attempt = 0; attempt < 10; attempt += 1) {
-    snapshot = await page.evaluate(() => ({
-      links: [...document.querySelectorAll('a[href*="/p/"], a[href*="/reel/"]')].map((item) => item.href),
-      bodyText: document.body?.innerText ?? "",
-    }));
-    if (snapshot.links.length > 0) return snapshot;
-    checkPageText(snapshot.bodyText, true);
-    await page.waitForTimeout(300);
-    throwIfAborted(signal);
-  }
-  return snapshot;
+function isPinned(post) {
+  return (post.timeline_pinned_user_ids?.length ?? 0) > 0;
 }
 
-async function readPostDetail(page, signal) {
-  const images = new Map();
-  let html = "";
-  let bodyText = "";
-  let previousSnapshot = "";
-  let unchangedRounds = 0;
-  let hasVideo = false;
-
-  for (let step = 0; step < 50 && unchangedRounds < 2; step += 1) {
-    throwIfAborted(signal);
-    const snapshot = await page.evaluate(() => ({
-      html: document.documentElement.outerHTML,
-      bodyText: document.body?.innerText ?? "",
-      images: [...document.querySelectorAll("article img")]
-        .filter((image) => image.naturalWidth >= 200 || image.width >= 200)
-        .map((image) => ({
-          src: image.src,
-          currentSrc: image.currentSrc,
-          srcset: image.srcset,
-          naturalWidth: image.naturalWidth,
-          naturalHeight: image.naturalHeight,
-        })),
-      hasVideo: Boolean(document.querySelector("article video")),
-    }));
-    html ||= snapshot.html;
-    bodyText = snapshot.bodyText;
-    checkPageText(bodyText, true);
-    hasVideo ||= Boolean(snapshot.hasVideo);
-    for (const image of snapshot.images ?? []) images.set(imageSnapshotKey(image), image);
-
-    const signature = (snapshot.images ?? []).map(imageSnapshotKey).join("|");
-    unchangedRounds = signature === previousSnapshot ? unchangedRounds + 1 : 0;
-    previousSnapshot = signature;
-
-    const nextButton = page.locator(
-      'article button[aria-label="Next"], article button[aria-label="下一步"], article button[aria-label="下一张"]',
-    ).last();
-    if ((await nextButton.count()) === 0 || !(await nextButton.isVisible())) break;
-    await nextButton.click();
-    await page.waitForTimeout(400);
-  }
-
-  return { html, bodyText, images: [...images.values()], hasVideo };
+function formatDay(seconds) {
+  return new Date(seconds * 1000).toISOString().slice(0, 10);
 }
 
 export class InstagramCollector {
@@ -122,109 +96,134 @@ export class InstagramCollector {
     browserManager,
     navigationRetryDelays = [5_000, 20_000],
     platformCooldownMs = 5 * 60_000,
+    scrollWaitMs = 4_000,
+    maxIdleScrolls = 5,
   }) {
     this.browserManager = browserManager;
     this.navigationRetryDelays = navigationRetryDelays;
     this.platformCooldownMs = platformCooldownMs;
+    this.scrollWaitMs = scrollWaitMs;
+    this.maxIdleScrolls = maxIdleScrolls;
   }
 
   async collect(task, { signal, onProgress, checkpoint = { entries: {} }, onCheckpoint = async () => {} }) {
     throwIfAborted(signal);
-    const profilePage = await this.browserManager.newPage("instagram");
-    let detailPage;
-    const cached = checkpoint.entries;
+    const profileKey = String(task.profileKey).toLowerCase();
+    const page = await this.browserManager.newPage("instagram");
+    const posts = new Map();
+    const state = { pageInfo: null, responses: 0 };
+    const pendingReads = new Set();
+    const onResponse = (response) => {
+      const url = response.url?.() ?? "";
+      if (!/instagram\.com\/(graphql\/query|api\/v1\/feed\/user)/.test(url)) return;
+      const read = response.json()
+        .then((payload) => {
+          readFeedPayload(payload, profileKey, posts, state);
+          state.responses += 1;
+        })
+        .catch(() => {});
+      pendingReads.add(read);
+      read.finally(() => pendingReads.delete(read));
+    };
     const pending = checkpoint.pending ?? {};
-    const notes = Object.values({ ...cached, ...pending }).map((entry) => entry.note).filter(Boolean);
-    const warnings = Object.values(cached).map((entry) => entry.warning).filter(Boolean);
-    let author = notes[0]?.author || task.profileKey;
-    let processed = 0;
-    const navigate = (page, url) => navigateWithRetry(page, url, {
-      signal,
-      retryDelays: this.navigationRetryDelays,
-      onRetry: () => onProgress({ stage: "页面暂时不可用，正在重试" }),
-    });
-    try {
-      detailPage = await this.browserManager.newPage("instagram");
-      await navigate(profilePage, task.profileUrl);
-      await profilePage.waitForTimeout(800);
-      const seen = new Set();
-      let unchangedRounds = 0;
-      let consecutiveOld = 0;
-      let stop = false;
+    const from = Date.parse(task.from);
+    const to = Date.parse(task.to);
+    let author = task.profileKey;
 
-      while (unchangedRounds < 2 && !stop) {
+    const waitForResponses = async () => {
+      const before = state.responses;
+      for (let waited = 0; waited < this.scrollWaitMs && state.responses === before; waited += 250) {
+        await page.waitForTimeout(250);
         throwIfAborted(signal);
-        const snapshot = await readProfileSnapshot(profilePage, signal);
-        const links = [...new Set([...Object.keys(pending), ...snapshot.links].map(normalizedPostUrl).filter(Boolean))];
-        const fresh = links.filter((url) => !seen.has(url));
-        checkPageText(snapshot.bodyText, seen.size === 0 && fresh.length === 0);
-        for (const url of fresh) seen.add(url);
-        unchangedRounds = fresh.length === 0 ? unchangedRounds + 1 : 0;
-        await onProgress({ stage: "扫描博主主页", current: seen.size, total: 0 });
-
-        for (const url of fresh) {
-          throwIfAborted(signal);
-          if (Object.hasOwn(cached, url)) {
-            const entry = cached[url];
-            consecutiveOld = entry.publishedAt && new Date(entry.publishedAt) < new Date(task.from)
-              ? consecutiveOld + 1 : 0;
-            processed += 1;
-            if (consecutiveOld >= 6) { stop = true; break; }
-            continue;
-          }
-          try {
-            await navigate(detailPage, url);
-          } catch (error) {
-            if (error?.code !== "PAGE_UNAVAILABLE") throw error;
-            if (error.status === 401) throw new LoginRequiredError();
-            if (![404, 410].includes(error.status)) throw error;
-            warnings.push(error.message);
-            await onCheckpoint({ key: url, warning: error.message, note: pending[url]?.note ?? null });
-            processed += 1;
-            await onProgress({ stage: "跳过不可访问帖子", current: processed, total: seen.size });
-            continue;
-          }
-          await detailPage.waitForTimeout(600);
-          const detail = await readPostDetail(detailPage, signal);
-          const note = mergeVisibleImages(
-            parseInstagramPostHtml(detail.html, url),
-            detail.images ?? [],
-            detail.hasVideo,
-          );
-          author = note.author || author;
-          const included = note.media.length > 0 && isInRange(note.publishedAt, task.from, task.to);
-          if (included) {
-            const previous = notes.findIndex((item) => item.id === note.id);
-            if (previous >= 0) notes.splice(previous, 1);
-            notes.push(note);
-            consecutiveOld = 0;
-          } else if (note.publishedAt && new Date(note.publishedAt) < new Date(task.from)) {
-            consecutiveOld += 1;
-          }
-          await onCheckpoint({ key: url, note: included ? note : pending[url]?.note ?? null, author, publishedAt: note.publishedAt });
-          processed += 1;
-          await onProgress({ stage: "读取帖子详情", current: processed, total: seen.size });
-          if (consecutiveOld >= 6) {
-            stop = true;
-            break;
-          }
-        }
-
-        if (!stop && unchangedRounds < 2) {
-          await profilePage.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-          await profilePage.waitForTimeout(800);
-        }
       }
-      return { author, notes, warnings };
+      await Promise.allSettled([...pendingReads]);
+    };
+    const partialResult = () => ({ author, notes: this.#notesInRange(posts, profileKey, from, to, pending), warnings: [] });
+
+    page.on?.("response", onResponse);
+    try {
+      await navigateWithRetry(page, task.profileUrl, {
+        signal,
+        retryDelays: this.navigationRetryDelays,
+        onRetry: () => onProgress({ stage: "页面暂时不可用，正在重试" }),
+      });
+      await waitForResponses();
+
+      let idle = 0;
+      let reachedEnd = false;
+      while (!reachedEnd) {
+        throwIfAborted(signal);
+        const before = posts.size;
+        const chronological = [...posts.values()].filter((post) => !isPinned(post));
+        const oldest = chronological.reduce((value, post) => Math.min(value, post.taken_at), Infinity);
+        if (Number.isFinite(oldest) && oldest * 1000 < from) break;
+        if (state.pageInfo?.has_next_page === false) {
+          reachedEnd = true;
+          break;
+        }
+        await onProgress({
+          stage: Number.isFinite(oldest) ? `扫描博主主页，已读到 ${formatDay(oldest)}` : "扫描博主主页",
+          current: posts.size,
+          total: 0,
+        });
+        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+        await waitForResponses();
+        idle = posts.size === before ? idle + 1 : 0;
+        if (idle >= this.maxIdleScrolls) break;
+      }
+
+      const bodyText = await page.evaluate(() => document.body?.innerText ?? "").catch(() => "");
+      if (posts.size === 0) {
+        checkPageText(bodyText, true);
+        if (/(^|\n)\s*0\s*(帖子|posts?)(\s|$)/i.test(bodyText)) return { author, notes: [], warnings: [] };
+        throw new Error("未能读取博主主页的帖子列表，请确认采集浏览器已登录 Instagram 后重试");
+      }
+      const chronological = [...posts.values()].filter((post) => !isPinned(post));
+      const oldest = chronological.reduce((value, post) => Math.min(value, post.taken_at), Infinity);
+      const complete = reachedEnd || state.pageInfo?.has_next_page === false || oldest * 1000 < from;
+      if (!complete) {
+        checkPageText(bodyText, true);
+        throw new PlatformTemporarilyUnavailableError(
+          `主页只加载到 ${formatDay(oldest)}，未到开始日期，稍后自动继续`,
+          { retryAfterMs: this.platformCooldownMs, partialResult: partialResult() },
+        );
+      }
+
+      const notes = this.#notesInRange(posts, profileKey, from, to, pending);
+      author = [...posts.values()].find((post) => String(post.user?.username ?? "").toLowerCase() === profileKey)?.user?.username
+        ?? author;
+      for (const note of notes) {
+        await onCheckpoint({ key: note.url, note, author, publishedAt: note.publishedAt });
+      }
+      await onProgress({ stage: "主页扫描完成", current: notes.length, total: notes.length });
+      return { author, notes, warnings: [] };
     } catch (error) {
       if (error?.code === "TRANSIENT_NAVIGATION_FAILURE") {
         throw new PlatformTemporarilyUnavailableError("平台访问过于频繁，任务将在冷却后自动继续", {
           retryAfterMs: this.platformCooldownMs,
-          partialResult: { author, notes, warnings },
+          partialResult: partialResult(),
           cause: error,
         });
       }
       throw error;
+    } finally {
+      page.off?.("response", onResponse);
     }
+  }
+
+  #notesInRange(posts, profileKey, from, to, pending) {
+    const notes = [];
+    const seen = new Set();
+    for (const post of posts.values()) {
+      const time = post.taken_at * 1000;
+      if (time < from || time > to) continue;
+      const note = noteFromFeedPost(post, profileKey);
+      seen.add(note.url);
+      if (note.media.length > 0) notes.push(note);
+    }
+    for (const [key, entry] of Object.entries(pending)) {
+      if (entry?.note && !seen.has(key) && !seen.has(entry.note.url)) notes.push(entry.note);
+    }
+    return notes.sort((left, right) => Date.parse(right.publishedAt) - Date.parse(left.publishedAt));
   }
 }

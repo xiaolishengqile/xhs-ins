@@ -4,6 +4,9 @@ export function createSettingsPage() {
   const form = document.querySelector("#settings-form");
   const preset = document.querySelector("#default-preset");
   const output = document.querySelector("#preferred-output-dir");
+  const imageDelay = document.querySelector("#image-delay");
+  const bloggerGap = document.querySelector("#blogger-gap");
+  const dailyLimit = document.querySelector("#daily-limit");
   const message = document.querySelector("#settings-message");
   const stop = document.querySelector("#stop-backend");
   const stopMessage = document.querySelector("#stop-message");
@@ -11,6 +14,9 @@ export function createSettingsPage() {
   function show(settings) {
     preset.value = settings.preset;
     output.value = settings.outputDir;
+    imageDelay.value = settings.imageDelaySeconds;
+    bloggerGap.value = settings.bloggerGapSeconds;
+    dailyLimit.value = settings.dailyBloggerLimit;
     document.querySelector("#actual-output-dir").textContent = settings.actualOutputDir;
     document.querySelector("#data-dir").textContent = settings.dataDir;
     document.querySelector("#node-version").textContent = settings.nodeVersion;
@@ -32,7 +38,13 @@ export function createSettingsPage() {
       const settings = await requestJson("/api/settings", {
         method: "PUT",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ preset: preset.value, outputDir: output.value.trim() }),
+        body: JSON.stringify({
+          preset: preset.value,
+          outputDir: output.value.trim(),
+          imageDelaySeconds: Number(imageDelay.value),
+          bloggerGapSeconds: Number(bloggerGap.value),
+          dailyBloggerLimit: Number(dailyLimit.value),
+        }),
       });
       show(settings);
       document.dispatchEvent(new CustomEvent("settings-changed", { detail: settings }));

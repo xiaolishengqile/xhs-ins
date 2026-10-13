@@ -47,8 +47,10 @@ function detailUrl(item) {
 }
 
 export class XiaohongshuCollector {
-  constructor({ browserManager }) {
+  constructor({ browserManager, scrollWaitMs = 4_000, maxIdleScrolls = 4 }) {
     this.browserManager = browserManager;
+    this.scrollWaitMs = scrollWaitMs;
+    this.maxIdleScrolls = maxIdleScrolls;
   }
 
   async collect(task, { signal, onProgress, checkpoint = { entries: {} }, onCheckpoint = async () => {} }) {
@@ -73,7 +75,7 @@ export class XiaohongshuCollector {
       const candidates = new Map();
       let author = "";
       let unchangedRounds = 0;
-      while (unchangedRounds < 2) {
+      while (unchangedRounds < this.maxIdleScrolls) {
         await Promise.allSettled([...pendingResponses]);
         const payloads = responsePayloads.splice(0);
         payloads.push(await initialState(profilePage));
@@ -92,9 +94,12 @@ export class XiaohongshuCollector {
         unchangedRounds = candidates.size === before ? unchangedRounds + 1 : 0;
         const chronological = addedThisRound.filter((item) => !item.pinned && item.publishedAt);
         if (chronological.length > 0 && chronological.every((item) => new Date(item.publishedAt) < new Date(task.from))) break;
-        if (unchangedRounds >= 2) break;
+        if (unchangedRounds >= this.maxIdleScrolls) break;
         await profilePage.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-        await profilePage.waitForTimeout(800);
+        for (let waited = 0; waited < this.scrollWaitMs && responsePayloads.length === 0 && pendingResponses.size === 0; waited += 250) {
+          await profilePage.waitForTimeout(250);
+          throwIfAborted(signal);
+        }
         throwIfAborted(signal);
       }
 
@@ -103,6 +108,12 @@ export class XiaohongshuCollector {
       if (allCandidates.length > 0 && usable.length === 0) await checkHumanAction(profilePage, true);
       if (allCandidates.length > 0 && usable.length === 0) throw new LoginRequiredError("公开主页未返回笔记编号，请先登录");
       await checkHumanAction(profilePage, usable.length === 0);
+      if (usable.length === 0 && Object.keys(checkpoint.pending ?? {}).length === 0) {
+        const text = await bodyText(profilePage);
+        if (!/还没有发布|暂无笔记|没有发布任何|还没有笔记/.test(text)) {
+          throw new Error("未能读取博主主页的笔记列表，请确认采集浏览器已登录小红书后重试");
+        }
+      }
 
       const pending = checkpoint.pending ?? {};
       const selected = usable.filter((item) => item.type !== "video" && inRange(item.publishedAt, task.from, task.to));

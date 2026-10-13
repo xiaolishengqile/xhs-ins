@@ -95,6 +95,7 @@ test("手动提交只创建待开始任务，点击开始后才运行", async (t
 
 test("采集周期默认使用最近一年", async (t) => {
   const { manager, page, url } = await fixture(t);
+  await page.clock.setFixedTime(new Date(2026, 7, 28, 12));
   await page.goto(url);
   assert.equal(await page.locator("#range-preset").inputValue(), "year");
   await page.getByLabel("博主主页链接").fill("https://www.instagram.com/year_creator/");

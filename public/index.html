@@ -38,7 +38,7 @@
                 name="url"
                 required
                 autocomplete="off"
-                rows="4"
+                rows="2"
                 placeholder="粘贴小红书或 Instagram 博主主页链接，每行一条，手动输入最多 500 条"
               ></textarea>
             </label>
@@ -54,15 +54,16 @@
               </select>
             </label>
 
-            <div id="custom-range" class="custom-range" hidden>
+            <div id="custom-range" class="custom-range">
               <label class="field">
                 <span>开始日期</span>
-                <input id="date-from" type="date" />
+                <input id="date-from" type="date" required />
               </label>
               <label class="field">
                 <span>结束日期</span>
-                <input id="date-to" type="date" />
+                <input id="date-to" type="date" required />
               </label>
+              <p class="file-help">快捷周期会填入起止日期，也可以直接修改。采集包含这两个日期当天。</p>
             </div>
 
             <div class="file-import">
@@ -115,10 +116,28 @@
             </div>
             <div class="task-controls">
               <span id="scheduler-status" class="refresh-status">正常调度</span>
+              <span id="attention-status" class="refresh-status is-paused" hidden></span>
               <button id="pause-all" class="task-action" type="button">暂停全部</button>
               <button id="open-output" class="task-action" type="button">打开图片文件夹</button>
               <span id="refresh-status" class="refresh-status">自动刷新</span>
             </div>
+          </div>
+          <div class="task-filters">
+            <input id="task-search" type="search" placeholder="搜索博主名或主页链接" aria-label="搜索博主" />
+            <select id="status-filter" aria-label="按状态筛选">
+              <option value="all">全部状态</option>
+              <option value="pending">待开始</option>
+              <option value="active">进行中</option>
+              <option value="completed">已完成</option>
+              <option value="partial">部分完成</option>
+              <option value="failed">失败或已取消</option>
+              <option value="attention">需处理</option>
+            </select>
+            <select id="platform-filter" aria-label="按平台筛选">
+              <option value="all">全部平台</option>
+              <option value="instagram">Instagram</option>
+              <option value="xiaohongshu">小红书</option>
+            </select>
           </div>
           <div id="bulk-actions" class="bulk-actions" hidden>
             <label class="bulk-select-all">
@@ -129,6 +148,8 @@
             <button id="start-selected" class="task-action" type="button" disabled>
               开始选中（0）
             </button>
+            <button id="update-selected" class="task-action" type="button" disabled>采集新增（0）</button>
+            <button id="recollect-selected" class="task-action" type="button" disabled>重新采集（0）</button>
             <button id="delete-selected" class="task-action task-action-danger" type="button" disabled>
               删除选中（0）
             </button>
@@ -138,7 +159,7 @@
             <p>在上方整理链接并加入待采集，然后手动开始任务。</p>
           </div>
           <div id="task-list" class="task-list" aria-live="polite"></div>
-          <nav id="pagination" class="bulk-actions" aria-label="任务分页" hidden>
+          <nav id="pagination" class="pager" aria-label="任务分页" hidden>
             <button id="previous-page" class="task-action" type="button">上一页</button>
             <span id="page-label"></span>
             <button id="next-page" class="task-action" type="button">下一页</button>
@@ -153,10 +174,24 @@
             <button id="refresh-images" class="task-action" type="button">刷新图片</button>
           </div>
           <p class="section-help">浏览已下载到电脑的图片。采集时仍会保存到当前后台图片目录。</p>
-          <label class="field image-account-field"><span>博主账号</span><select id="image-account"></select></label>
+          <div class="image-filters">
+            <label class="field image-account-field"><span>博主账号</span><select id="image-account"></select></label>
+            <label class="field"><span>发布日期从</span><input id="image-from" type="date" /></label>
+            <label class="field"><span>到</span><input id="image-to" type="date" /></label>
+            <button id="image-clear-dates" class="secondary-button" type="button">清除日期</button>
+          </div>
           <p id="images-message" class="form-message" role="status" aria-live="polite"></p>
+          <div id="image-actions" class="bulk-actions" hidden>
+            <label class="bulk-select-all">
+              <input id="image-select-page" type="checkbox" aria-label="全选本页图片" />
+              <span>全选本页</span>
+            </label>
+            <button id="image-select-all" class="task-action" type="button">选择全部</button>
+            <span id="image-selection-count">已选 0 张</span>
+            <button id="image-delete" class="task-action task-action-danger" type="button" disabled>删除选中（0）</button>
+          </div>
           <div id="image-grid" class="image-grid"></div>
-          <nav id="image-pagination" class="bulk-actions" aria-label="图片分页" hidden>
+          <nav id="image-pagination" class="pager" aria-label="图片分页" hidden>
             <button id="image-previous" class="task-action" type="button">上一页</button>
             <span id="image-page-label"></span>
             <button id="image-next" class="task-action" type="button">下一页</button>
@@ -190,6 +225,12 @@
               <select id="default-preset"><option value="week">最近一周</option><option value="month">最近一个月</option><option value="halfYear">最近半年</option><option value="year">最近一年</option></select>
             </label>
             <label class="field"><span>下次启动图片目录</span><input id="preferred-output-dir" type="text" placeholder="留空使用默认图片目录" /></label>
+            <div class="throttle-fields">
+              <label class="field"><span>每张图片下载间隔（秒）</span><input id="image-delay" type="number" min="0" max="60" step="0.1" /></label>
+              <label class="field"><span>博主之间间隔（秒）</span><input id="blogger-gap" type="number" min="0" max="3600" step="1" /></label>
+              <label class="field"><span>每日最多采集博主数（0 不限）</span><input id="daily-limit" type="number" min="0" max="10000" step="1" /></label>
+            </div>
+            <p class="section-help">放慢速度可以降低被平台限流的风险；这三项保存后立即生效。</p>
             <p class="section-help">更改图片目录后，安全停止后台并重新启动才会生效；已有图片不会移动。</p>
             <button class="primary-button" type="submit">保存设置</button>
           </form>

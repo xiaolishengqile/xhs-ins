@@ -13,9 +13,24 @@ import { startServer } from "./http/server.js";
 import { TaskManager } from "./tasks/task-manager.js";
 import { TaskStore } from "./tasks/task-store.js";
 import { SchedulerStateStore } from "./tasks/scheduler-state-store.js";
-import { ApplicationController } from "./application/controller.js";
+import { ApplicationController, throttleFrom } from "./application/controller.js";
 import { PreferencesStore } from "./application/preferences-store.js";
 import { defaultPicturesDirectory } from "./system/pictures-directory.js";
+
+function abortableDelay(milliseconds, signal) {
+  if (!milliseconds) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException("已取消", "AbortError"));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, milliseconds);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
 
 function defaultDataDir() {
   return process.env.VERCEL === "1" ? path.join(tmpdir(), "xhs-ins") : path.resolve(".data");
@@ -24,8 +39,8 @@ function defaultDataDir() {
 export async function createRuntime({ dataDir = defaultDataDir(), outputDir } = {}) {
   await mkdir(dataDir, { recursive: true });
   const preferencesStore = new PreferencesStore(dataDir);
-  const preferredOutputDir = (await preferencesStore.load()).outputDir;
-  outputDir ??= preferredOutputDir || await defaultPicturesDirectory();
+  const preferences = await preferencesStore.load();
+  outputDir ??= preferences.outputDir || await defaultPicturesDirectory();
   const store = new TaskStore(path.join(dataDir, "tasks"));
   const controlStore = new SchedulerStateStore(path.join(dataDir, "scheduler.json"));
   const browserManager = new BrowserManager({ profilesDir: path.join(dataDir, "browser-profiles") });
@@ -44,7 +59,10 @@ export async function createRuntime({ dataDir = defaultDataDir(), outputDir } = 
     taskSessionFactory: (task) => browserManager.createTaskSession(task.platform, task.id),
     exporter: async (task, notes, _taskDir, { signal, onProgress, browserSession, retryMedia }) => {
       const saved = await imageStore.save(task, notes, {
-        fetchBuffer: (url) => browserSession.fetchBuffer(url),
+        fetchBuffer: async (url) => {
+          await abortableDelay(manager.throttle.imageDelayMs, signal);
+          return browserSession.fetchBuffer(url);
+        },
         onProgress: (progress) => onProgress({ ...progress, stage: "下载图片" }),
         signal,
         retryMedia,
@@ -52,6 +70,7 @@ export async function createRuntime({ dataDir = defaultDataDir(), outputDir } = 
       return saved;
     },
   });
+  manager.setThrottle(throttleFrom(preferences));
   await manager.init();
   const controller = new ApplicationController({ manager, browserManager, outputDir, dataDir, preferencesStore });
   return {

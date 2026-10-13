@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, open, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, open, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { request as httpRequest } from "node:http";
@@ -9,6 +9,7 @@ import sharp from "sharp";
 import { createApp } from "../../src/http/app.js";
 import { startServer } from "../../src/http/server.js";
 import { ApplicationController } from "../../src/application/controller.js";
+import { LocalImageLibrary } from "../../src/images/local-image-library.js";
 
 const PNG = await sharp({ create: { width: 2, height: 1, channels: 3, background: "#cc3344" } }).png().toBuffer();
 
@@ -104,6 +105,35 @@ test("图片页码超过末页时收敛到最后一页", async (t) => {
   assert.equal(result.images.length, 1);
 });
 
+test("删除选中图片只影响账号目录内的图片文件", async (t) => {
+  const { url, temp, accountDir } = await fixture(t);
+  await writeFile(path.join(accountDir, "第二张.png"), PNG);
+  await writeFile(path.join(accountDir, "说明.txt"), "keep");
+  await writeFile(path.join(temp, "outside.png"), PNG);
+  const remove = (body) => fetch(`${url}/api/images/delete`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  });
+
+  assert.equal((await remove({ account: "账号甲", names: ["../outside.png"] })).status, 400);
+  assert.equal((await remove({ account: "账号甲", names: [] })).status, 400);
+  const result = await (await remove({ account: "账号甲", names: ["第一张.png", "说明.txt", "不存在.png"] })).json();
+
+  assert.deepEqual(result, { deleted: 1, remaining: 1 });
+  assert.deepEqual((await readdir(accountDir)).sort(), ["第二张.png", "说明.txt"]);
+  assert.ok((await readdir(temp)).includes("outside.png"));
+});
+
+test("全部删除后清理空账号目录", async (t) => {
+  const { url, outputDir } = await fixture(t);
+  const result = await (await fetch(`${url}/api/images/delete`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ account: "账号甲", all: true }),
+  })).json();
+
+  assert.deepEqual(result, { deleted: 1, remaining: 0 });
+  assert.deepEqual(await readdir(outputDir), []);
+});
+
 test("图片预览只能打开已确认的账号目录", async (t) => {
   const opened = [];
   const { url, accountDir } = await fixture(t, { openPath: async (directory) => opened.push(directory) });
@@ -119,4 +149,37 @@ test("图片预览只能打开已确认的账号目录", async (t) => {
   });
   assert.equal(invalid.status, 400);
   assert.deepEqual(opened, [accountDir]);
+});
+
+test("图片按帖子发布日期排序、可按日期筛选，删除后在索引中标记", async (t) => {
+  const temp = await mkdtemp(path.join(tmpdir(), "collector-library-"));
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  const rootDir = path.join(temp, "图片");
+  const indexDir = path.join(temp, "index");
+  await mkdir(path.join(rootDir, "creator"), { recursive: true });
+  await mkdir(indexDir, { recursive: true });
+  for (const name of ["old.png", "new-1.png", "new-2.png", "loose.png"]) await writeFile(path.join(rootDir, "creator", name), PNG);
+  const indexFile = path.join(indexDir, "instagram-creator.json");
+  await writeFile(indexFile, JSON.stringify({
+    nextSequence: 4,
+    items: {
+      "instagram:creator:OLD:0": { fileName: "old.png", noteId: "OLD", noteUrl: "https://www.instagram.com/p/OLD/", publishedAt: "2026-01-05T08:00:00.000Z" },
+      "instagram:creator:NEW:0": { fileName: "new-1.png", noteId: "NEW", noteUrl: "https://www.instagram.com/p/NEW/", publishedAt: "2026-08-20T08:00:00.000Z" },
+      "instagram:creator:NEW:1": { fileName: "new-2.png", noteId: "NEW", noteUrl: "https://www.instagram.com/p/NEW/", publishedAt: "2026-08-20T08:00:00.000Z" },
+    },
+  }));
+  const library = new LocalImageLibrary(rootDir, indexDir);
+
+  const all = await library.list("creator", 1);
+  assert.deepEqual(all.images.map((image) => image.name), ["new-1.png", "new-2.png", "old.png", "loose.png"]);
+  assert.equal(all.images[0].noteUrl, "https://www.instagram.com/p/NEW/");
+  const august = await library.list("creator", 1, { from: "2026-08-01", to: "2026-08-31" });
+  assert.deepEqual(august.images.map((image) => image.name), ["new-1.png", "new-2.png"]);
+
+  const removed = await library.remove("creator", null, { from: "2026-08-01", to: "2026-08-31" });
+  assert.deepEqual(removed, { deleted: 2, remaining: 2 });
+  const index = JSON.parse(await readFile(indexFile, "utf8"));
+  assert.equal(index.items["instagram:creator:NEW:0"].deleted, true);
+  assert.equal(index.items["instagram:creator:NEW:1"].deleted, true);
+  assert.equal(index.items["instagram:creator:OLD:0"].deleted, undefined);
 });

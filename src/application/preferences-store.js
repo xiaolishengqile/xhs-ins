@@ -3,7 +3,13 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 const PRESETS = new Set(["week", "month", "halfYear", "year"]);
-const DEFAULTS = Object.freeze({ preset: "year", outputDir: "" });
+export const THROTTLE_DEFAULTS = Object.freeze({ imageDelaySeconds: 0.5, bloggerGapSeconds: 30, dailyBloggerLimit: 0 });
+const THROTTLE_LIMITS = {
+  imageDelaySeconds: [0, 60, "图片下载间隔"],
+  bloggerGapSeconds: [0, 3600, "博主之间的间隔"],
+  dailyBloggerLimit: [0, 10_000, "每日采集博主上限"],
+};
+const DEFAULTS = Object.freeze({ preset: "year", outputDir: "", ...THROTTLE_DEFAULTS });
 
 function validate(value) {
   if (!value || typeof value !== "object" || !PRESETS.has(value.preset)) {
@@ -12,7 +18,13 @@ function validate(value) {
   if (typeof value.outputDir !== "string" || (value.outputDir && !path.isAbsolute(value.outputDir))) {
     throw new Error("图片目录必须是绝对路径或留空");
   }
-  return { preset: value.preset, outputDir: value.outputDir };
+  const throttle = {};
+  for (const [key, [min, max, label]] of Object.entries(THROTTLE_LIMITS)) {
+    const number = Number(value[key] ?? THROTTLE_DEFAULTS[key]);
+    if (!Number.isFinite(number) || number < min || number > max) throw new Error(`${label}必须在 ${min} 到 ${max} 之间`);
+    throttle[key] = key === "dailyBloggerLimit" ? Math.round(number) : number;
+  }
+  return { preset: value.preset, outputDir: value.outputDir, ...throttle };
 }
 
 async function readJson(file) {

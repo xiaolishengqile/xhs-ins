@@ -1,8 +1,10 @@
-import { lstat, readFile, readdir, realpath } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { lstat, readFile, readdir, realpath, rename, rm, rmdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import sharp from "sharp";
 
 const PAGE_SIZE = 30;
+const PLATFORMS = ["instagram", "xiaohongshu"];
 const MAX_FILE_BYTES = 64 * 1024 * 1024;
 const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif"]);
 const IMAGE_TYPES = new Map([
@@ -30,9 +32,45 @@ async function entries(directory) {
   }
 }
 
+async function readIndex(file) {
+  try {
+    return JSON.parse(await readFile(file, "utf8"));
+  } catch (error) {
+    if (error.code === "ENOENT" || error instanceof SyntaxError) return null;
+    throw error;
+  }
+}
+
+const SHORTCODE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+function publishedFromId(platform, noteId) {
+  let time = null;
+  if (platform === "instagram" && /^[A-Za-z0-9_-]{8,14}$/.test(noteId)) {
+    let id = 0n;
+    for (const character of noteId) id = id * 64n + BigInt(SHORTCODE_ALPHABET.indexOf(character));
+    time = Number((id >> 23n) + 1314220021721n);
+  } else if (platform === "xiaohongshu" && /^[0-9a-f]{24}$/i.test(noteId)) {
+    time = Number.parseInt(noteId.slice(0, 8), 16) * 1000;
+  }
+  return Number.isFinite(time) && time > 0 ? new Date(time).toISOString() : null;
+}
+
+function noteUrlFor(platform, noteId) {
+  return platform === "instagram"
+    ? `https://www.instagram.com/p/${encodeURIComponent(noteId)}/`
+    : `https://www.xiaohongshu.com/explore/${encodeURIComponent(noteId)}`;
+}
+
+function dayBoundary(value, endOfDay) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) throw failure("日期格式无效", 400);
+  const [year, month, day] = value.split("-").map(Number);
+  return endOfDay ? new Date(year, month - 1, day, 23, 59, 59, 999).getTime() : new Date(year, month - 1, day).getTime();
+}
+
 export class LocalImageLibrary {
-  constructor(rootDir) {
+  constructor(rootDir, indexDir = null) {
     this.rootDir = path.resolve(rootDir);
+    this.indexDir = indexDir ? path.resolve(indexDir) : null;
     this.thumbnails = new Map();
   }
 
@@ -64,21 +102,106 @@ export class LocalImageLibrary {
     return this.#accountDir(account);
   }
 
-  async list(account, page = 1) {
-    const directory = await this.#accountDir(account);
-    if (!Number.isSafeInteger(page) || page < 1) throw failure("页码无效", 400);
-    const names = (await entries(directory))
+  async #imageNames(directory) {
+    return (await entries(directory))
       .filter((entry) => entry.isFile() && IMAGE_EXTENSIONS.has(path.extname(entry.name).toLowerCase()))
       .map((entry) => entry.name)
       .sort();
-    const pageCount = Math.max(1, Math.ceil(names.length / PAGE_SIZE));
+  }
+
+  #indexFiles(account) {
+    if (!this.indexDir) return [];
+    return PLATFORMS.map((platform) => ({ platform, file: path.join(this.indexDir, `${platform}-${account}.json`) }));
+  }
+
+  async #sources(account) {
+    const sources = new Map();
+    for (const { platform, file } of this.#indexFiles(account)) {
+      const index = await readIndex(file);
+      for (const [key, item] of Object.entries(index?.items ?? {})) {
+        if (!item?.fileName || item.deleted || sources.has(item.fileName)) continue;
+        const noteId = item.noteId ?? key.split(":")[2];
+        if (!noteId) continue;
+        const publishedAt = item.publishedAt ?? publishedFromId(platform, noteId);
+        sources.set(item.fileName, { noteId, noteUrl: item.noteUrl ?? noteUrlFor(platform, noteId), publishedAt });
+      }
+    }
+    return sources;
+  }
+
+  async #entries(account, range) {
+    const directory = await this.#accountDir(account);
+    const sources = await this.#sources(account);
+    const from = range?.from ? dayBoundary(range.from, false) : -Infinity;
+    const to = range?.to ? dayBoundary(range.to, true) : Infinity;
+    const filtering = Number.isFinite(from) || Number.isFinite(to);
+    const items = (await this.#imageNames(directory)).map((name) => ({ name, ...sources.get(name) }))
+      .filter((item) => {
+        if (!filtering) return true;
+        const time = Date.parse(item.publishedAt ?? "");
+        return Number.isFinite(time) && time >= from && time <= to;
+      });
+    items.sort((left, right) => {
+      const byDate = (Date.parse(right.publishedAt ?? "") || 0) - (Date.parse(left.publishedAt ?? "") || 0);
+      if (byDate) return byDate;
+      return left.name < right.name ? -1 : left.name > right.name ? 1 : 0;
+    });
+    return { directory, items };
+  }
+
+  async remove(account, names, range) {
+    if (names !== null && (!Array.isArray(names) || names.length === 0 || names.length > 5_000)) {
+      throw failure("请选择要删除的图片", 400);
+    }
+    for (const name of names ?? []) segment(name);
+    const { directory, items } = await this.#entries(account, names === null ? range : null);
+    const available = new Set(items.map((item) => item.name));
+    const total = (await this.#imageNames(directory)).length;
+    const targets = names === null ? [...available] : [...new Set(names)].filter((name) => available.has(name));
+    for (const name of targets) await rm(path.join(directory, name));
+    await this.#markDeleted(account, new Set(targets));
+    const remaining = total - targets.length;
+    if (remaining === 0) await rmdir(directory).catch(() => {});
+    return { deleted: targets.length, remaining };
+  }
+
+  async #markDeleted(account, names) {
+    if (names.size === 0) return;
+    const deletedAt = new Date().toISOString();
+    for (const { file } of this.#indexFiles(account)) {
+      const index = await readIndex(file);
+      if (!index?.items) continue;
+      let changed = false;
+      for (const [key, item] of Object.entries(index.items)) {
+        if (!names.has(item?.fileName) || item.deleted) continue;
+        index.items[key] = { ...item, deleted: true, deletedAt };
+        changed = true;
+      }
+      if (!changed) continue;
+      const temporary = `${file}.${randomUUID()}.tmp`;
+      await writeFile(temporary, `${JSON.stringify(index, null, 2)}\n`, "utf8");
+      await rename(temporary, file);
+    }
+  }
+
+  async list(account, page = 1, range = null) {
+    if (!Number.isSafeInteger(page) || page < 1) throw failure("页码无效", 400);
+    const { items } = await this.#entries(account, range);
+    const pageCount = Math.max(1, Math.ceil(items.length / PAGE_SIZE));
     page = Math.min(page, pageCount);
-    const selected = names.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+    const selected = items.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
     return {
-      account, page, pageCount, total: names.length,
-      images: selected.map((name) => {
-        const query = `account=${encodeURIComponent(account)}&name=${encodeURIComponent(name)}`;
-        return { name, url: `/api/images/file?${query}`, thumbnailUrl: `/api/images/file?${query}&size=thumb` };
+      account, page, pageCount, total: items.length,
+      images: selected.map((item) => {
+        const query = `account=${encodeURIComponent(account)}&name=${encodeURIComponent(item.name)}`;
+        return {
+          name: item.name,
+          url: `/api/images/file?${query}`,
+          thumbnailUrl: `/api/images/file?${query}&size=thumb`,
+          noteId: item.noteId ?? null,
+          noteUrl: item.noteUrl ?? null,
+          publishedAt: item.publishedAt ?? null,
+        };
       }),
     };
   }

@@ -48,6 +48,15 @@ test("网页设置保留运行中的真实目录，并在下一次启动应用�
   assert.equal(saved.preset, "month");
   assert.equal(saved.outputDir, nextOutputDir);
   assert.equal(saved.actualOutputDir, currentOutputDir);
+  assert.equal(saved.imageDelaySeconds, 0.5);
+  assert.equal(saved.bloggerGapSeconds, 30);
+
+  const throttled = await (await fetch(`${url}/api/settings`, {
+    method: "PUT", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ preset: "month", outputDir: nextOutputDir, imageDelaySeconds: 2, bloggerGapSeconds: 120, dailyBloggerLimit: 20 }),
+  })).json();
+  assert.equal(throttled.dailyBloggerLimit, 20);
+  assert.deepEqual(runtime.manager.throttle, { imageDelayMs: 2000, bloggerGapMs: 120_000, dailyLimit: 20 });
 
   const restarted = await createRuntime({ dataDir });
   t.after(() => restarted.close());
@@ -59,6 +68,8 @@ test("设置拒绝无效周期和相对目录，不覆盖上次保存", async (t
   for (const bad of [
     { preset: "forever", outputDir: "" },
     { preset: "week", outputDir: "relative/pictures" },
+    { preset: "week", outputDir: "", imageDelaySeconds: -1 },
+    { preset: "week", outputDir: "", dailyBloggerLimit: "很多" },
   ]) {
     const response = await fetch(`${url}/api/settings`, {
       method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(bad),

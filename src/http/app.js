@@ -99,12 +99,19 @@ async function handleRequest(request, response, { manager, controller, publicDir
     return sendJson(response, 200, { accounts: await imageLibrary.accounts() });
   }
   if (request.method === "GET" && pathname === "/api/images") {
-    return sendJson(response, 200, await imageLibrary.list(url.searchParams.get("account"), Number(url.searchParams.get("page") ?? 1)));
+    const range = { from: url.searchParams.get("from") || null, to: url.searchParams.get("to") || null };
+    return sendJson(response, 200, await imageLibrary.list(
+      url.searchParams.get("account"), Number(url.searchParams.get("page") ?? 1), range,
+    ));
   }
   if (request.method === "GET" && pathname === "/api/images/file") {
     return sendImage(response, await imageLibrary.read(
       url.searchParams.get("account"), url.searchParams.get("name"), url.searchParams.get("size") ?? "original",
     ));
+  }
+  if (request.method === "POST" && pathname === "/api/images/delete") {
+    const { account, names, all, from, to } = await readJson(request);
+    return sendJson(response, 200, await imageLibrary.remove(account, all === true ? null : names, { from, to }));
   }
   if (request.method === "POST" && pathname === "/api/images/open-folder") {
     const { account } = await readJson(request);
@@ -153,12 +160,17 @@ async function handleRequest(request, response, { manager, controller, publicDir
     const result = await manager.createBatch(await readJson(request));
     return sendJson(response, 202, { ...result, control: manager.controlStatus() });
   }
+  const batchMatch = pathname.match(/^\/api\/tasks\/(recollect|update)-batch$/);
+  if (request.method === "POST" && batchMatch) {
+    const { ids, range } = await readJson(request);
+    return sendJson(response, 200, await manager.runBatch(batchMatch[1], ids, range));
+  }
   if (request.method === "POST" && pathname === "/api/tasks/start-batch") {
-    const { ids } = await readJson(request);
-    return sendJson(response, 200, await controller.startBatch(ids));
+    const { ids, range } = await readJson(request);
+    return sendJson(response, 200, await controller.startBatch(ids, range));
   }
 
-  const taskMatch = pathname.match(/^\/api\/tasks\/([0-9a-f-]+)(?:\/(start|cancel|retry|update|login|resume|recover))?$/i);
+  const taskMatch = pathname.match(/^\/api\/tasks\/([0-9a-f-]+)(?:\/(start|cancel|retry|update|recollect|login|resume|recover))?$/i);
   if (taskMatch) {
     const [, id, action] = taskMatch;
     const task = manager.get(id);
@@ -177,8 +189,16 @@ async function handleRequest(request, response, { manager, controller, publicDir
     if (action === "recover" && request.method === "POST") {
       return sendJson(response, 200, { task: await controller.recoverBrowser(id) });
     }
-    if (["start", "cancel", "retry", "update"].includes(action) && request.method === "POST") {
-      const updated = action === "start" ? await controller.start(id) : await manager[action](id);
+    if (action === "start" && request.method === "POST") {
+      const { range } = await readJson(request);
+      return sendJson(response, 200, { task: await controller.start(id, range) });
+    }
+    if (["update", "recollect"].includes(action) && request.method === "POST") {
+      const { range } = await readJson(request);
+      return sendJson(response, 200, { task: await manager[action](id, range) });
+    }
+    if (["cancel", "retry"].includes(action) && request.method === "POST") {
+      const updated = await manager[action](id);
       return sendJson(response, 200, { task: updated });
     }
   }
@@ -187,7 +207,16 @@ async function handleRequest(request, response, { manager, controller, publicDir
   sendJson(response, 404, { error: "请求地址不存在" });
 }
 
-export function createApp({ manager, controller = manager, publicDir = DEFAULT_PUBLIC_DIR, imageLibrary = new LocalImageLibrary(controller.outputDir), requestStop }) {
+export function createApp({
+  manager,
+  controller = manager,
+  publicDir = DEFAULT_PUBLIC_DIR,
+  imageLibrary = new LocalImageLibrary(
+    controller.outputDir,
+    controller.dataDir ? path.join(controller.dataDir, "output-index") : null,
+  ),
+  requestStop,
+}) {
   return (request, response) => {
     handleRequest(request, response, { manager, controller, publicDir, imageLibrary, requestStop }).catch((error) => {
       if (!response.headersSent) sendJson(response, statusForError(error), { error: error.message || "请求失败" });

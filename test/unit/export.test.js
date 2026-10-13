@@ -348,3 +348,30 @@ test("升级图片命中已有摘要时会删除失去引用的低清文件", as
   assert.equal(lowEntry.fileName, highEntry.fileName);
   assert.deepEqual(await readdir(authorDir), [highEntry.fileName]);
 });
+
+test("索引记录来源帖子，标记删除的图片不再下载", async (t) => {
+  const { rootDir, indexDir, store } = await fixture(t);
+  const post = { ...note("post-1", 1, ["https://cdn.example/a.jpg", "https://cdn.example/b.jpg"]), url: "https://www.instagram.com/p/post-1/", publishedAt: "2026-08-20T00:00:00.000Z" };
+  await store.save(task(), [post], { fetchBuffer: async (url) => jpegBuffer(1080, url.endsWith("a.jpg") ? 1350 : 1351) });
+  const indexFile = path.join(indexDir, "instagram-test.creator.json");
+  const index = JSON.parse(await readFile(indexFile, "utf8"));
+  const first = index.items["instagram:test.creator:post-1:0"];
+  assert.equal(first.noteId, "post-1");
+  assert.equal(first.noteUrl, "https://www.instagram.com/p/post-1/");
+  assert.equal(first.publishedAt, "2026-08-20T00:00:00.000Z");
+
+  index.items["instagram:test.creator:post-1:0"] = { ...first, deleted: true };
+  await writeFile(indexFile, JSON.stringify(index));
+  await rm(path.join(rootDir, "test.creator", first.fileName));
+  const fetched = [];
+  const again = { ...post, media: post.media.map((item) => ({ ...item })) };
+  const result = await store.save(task(), [again], {
+    fetchBuffer: async (url) => { fetched.push(url); return jpegBuffer(1080, 1350); },
+  });
+
+  assert.deepEqual(fetched, []);
+  assert.equal(result.imagesExcluded, 1);
+  assert.equal(result.imagesAvailable, 1);
+  assert.equal(result.notes[0].media[0].excluded, true);
+  assert.equal((await readdir(path.join(rootDir, "test.creator"))).length, 1);
+});

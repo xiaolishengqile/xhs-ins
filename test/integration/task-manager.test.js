@@ -67,6 +67,132 @@ test("新任务保持待开始，用户明确启动后才采集", async (t) => {
   assert.equal(runs, 1);
 });
 
+test("启动时改用本次指定的采集区间", async (t) => {
+  const manager = await managerFixture(t, async (task) => ({ author: task.profileKey, notes: [] }));
+  const created = await manager.create(input(0));
+
+  await manager.start(created.id, { preset: "custom", from: "2025-10-13", to: "2026-10-13" });
+
+  const started = manager.get(created.id);
+  const from = new Date(2025, 9, 13);
+  from.setHours(0, 0, 0, 0);
+  const to = new Date(2026, 9, 13);
+  to.setHours(23, 59, 59, 999);
+  assert.equal(started.from, from.toISOString());
+  assert.equal(started.to, to.toISOString());
+});
+
+test("采集新增改用本次指定的起止日期", async (t) => {
+  const manager = await managerFixture(t, async (task) => ({ author: task.profileKey, notes: [] }));
+  const created = await manager.create(input(0));
+  await manager.start(created.id);
+  await eventually(() => assert.equal(manager.get(created.id).status, "completed"));
+
+  await manager.update(created.id, { preset: "custom", from: "2026-01-01", to: "2026-08-28" });
+
+  const updated = manager.get(created.id);
+  assert.equal(updated.from, new Date(2026, 0, 1).toISOString());
+  assert.equal(updated.to, new Date(2026, 7, 28, 23, 59, 59, 999).toISOString());
+  await eventually(() => assert.equal(manager.get(created.id).status, "completed"));
+});
+
+test("重新采集会停止运行中的任务、清空断点并按新区间重跑", async (t) => {
+  let runs = 0;
+  let seenCheckpoint;
+  const manager = await managerFixture(t, async (task, { signal, checkpoint, onCheckpoint }) => {
+    runs += 1;
+    if (runs === 1) {
+      await onCheckpoint({ key: "old", note: { id: "old", media: [] } });
+      await new Promise((_resolve, reject) => {
+        const stop = () => reject(new DOMException("停止", "AbortError"));
+        if (signal.aborted) stop();
+        else signal.addEventListener("abort", stop, { once: true });
+      });
+    }
+    seenCheckpoint = checkpoint;
+    return { author: task.profileKey, notes: [] };
+  });
+  const created = await manager.create(input(0));
+  await manager.start(created.id);
+  await eventually(() => assert.equal(runs, 1));
+
+  await manager.recollect(created.id, { preset: "custom", from: "2026-03-01", to: "2026-08-28" });
+
+  await eventually(() => assert.equal(manager.get(created.id).status, "completed"));
+  assert.equal(runs, 2);
+  assert.deepEqual(seenCheckpoint.entries, {});
+  assert.equal(manager.get(created.id).from, new Date(2026, 2, 1).toISOString());
+});
+
+test("博主之间按设置的间隔启动，并显示等待状态", async (t) => {
+  let clock = new Date(2026, 7, 28, 12).getTime();
+  const manager = await managerFixture(t, async (task) => ({ author: task.profileKey, notes: [] }), {
+    maxConcurrency: 1,
+    now: () => new Date(clock),
+  });
+  manager.setThrottle({ bloggerGapMs: 60_000 });
+  const first = await manager.create(input(0));
+  const second = await manager.create(input(1));
+  await manager.startBatch([first.id, second.id]);
+
+  await eventually(() => assert.equal(manager.get(first.id).status, "completed"));
+  await eventually(() => assert.equal(manager.controlStatus().throttleWait?.reason, "gap"));
+  assert.equal(manager.get(second.id).status, "queued");
+
+  clock += 61_000;
+  manager.setThrottle({});
+  await eventually(() => assert.equal(manager.get(second.id).status, "completed"));
+  assert.equal(manager.controlStatus().throttleWait, null);
+});
+
+test("每日上限只限制当天新开始的博主", async (t) => {
+  const manager = await managerFixture(t, async (task) => ({ author: task.profileKey, notes: [] }), { maxConcurrency: 1 });
+  manager.setThrottle({ dailyLimit: 1 });
+  const first = await manager.create(input(0));
+  const second = await manager.create(input(1));
+  await manager.startBatch([first.id, second.id]);
+
+  await eventually(() => assert.equal(manager.get(first.id).status, "completed"));
+  await eventually(() => assert.equal(manager.controlStatus().throttleWait?.reason, "daily"));
+  assert.equal(manager.get(second.id).status, "queued");
+
+  await manager.recollect(first.id);
+  await eventually(() => assert.equal(manager.get(first.id).status, "completed"));
+  assert.equal(manager.get(second.id).status, "queued");
+});
+
+test("批量采集新增只处理已完成任务并报告跳过原因", async (t) => {
+  const manager = await managerFixture(t, async (task) => ({ author: task.profileKey, notes: [] }));
+  const done = await manager.create(input(0));
+  const pending = await manager.create(input(1));
+  await manager.start(done.id);
+  await eventually(() => assert.equal(manager.get(done.id).status, "completed"));
+
+  const result = await manager.runBatch("update", [done.id, pending.id], { preset: "week" });
+
+  assert.deepEqual(result.started, [done.id]);
+  assert.deepEqual(result.skipped.map((item) => item.id), [pending.id]);
+  assert.match(result.skipped[0].reason, /只有已完成或部分完成/);
+});
+
+test("批量创建会跳过已在任务列表中的同一博主", async (t) => {
+  const manager = await managerFixture(t, async (task) => ({ author: task.profileKey, notes: [] }));
+  await manager.create(input(0));
+
+  const result = await manager.createBatch({
+    entries: [
+      { line: 1, url: "https://www.xiaohongshu.com/user/profile/user0?xsec_token=temporary" },
+      { line: 2, url: "https://www.xiaohongshu.com/user/profile/user1" },
+    ],
+    range: { preset: "week" },
+  });
+
+  assert.equal(result.tasks.length, 1);
+  assert.equal(result.duplicates, 1);
+  assert.equal(result.tasks[0].profileKey, "user1");
+  assert.equal(manager.list().length, 2);
+});
+
 test("批量启动只启动待开始任务并跳过重复编号", async (t) => {
   const manager = await managerFixture(t, async (task) => ({ author: task.profileKey, notes: [] }));
   const first = await manager.create(input(0));

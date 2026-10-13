@@ -33,6 +33,11 @@ export class CollectionCheckpoint {
     await this.#save();
   }
 
+  async reset() {
+    this.value = { version: 1, entries: {}, pending: {}, retryMedia: null, result: null };
+    await this.#save();
+  }
+
   async complete(result) {
     this.value.result = structuredClone(result);
     await this.#save();

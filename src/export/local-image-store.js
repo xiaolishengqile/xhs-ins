@@ -21,7 +21,9 @@ function escaped(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function qualityFor(metadata) {
+function qualityFor(metadata, media) {
+  const sourceWidth = Number(media?.sourceWidth);
+  if (Number.isFinite(sourceWidth) && sourceWidth > 0 && metadata.width >= sourceWidth) return "full";
   return Math.max(metadata.width, metadata.height) >= 1080 ? "full" : "preview";
 }
 
@@ -97,14 +99,23 @@ export class LocalImageStore {
     let imagesAvailable = 0;
     let imagesFailed = 0;
     let imagesUpgradeFailed = 0;
+    let imagesExcluded = 0;
     const retryKeys = retryMedia ? new Set(retryMedia) : null;
 
     for (const note of result) {
+      const source = { noteId: note.id, noteUrl: note.url ?? null, publishedAt: note.publishedAt ?? null };
       for (let mediaIndex = 0; mediaIndex < (note.media?.length ?? 0); mediaIndex += 1) {
         throwIfAborted(signal);
         const media = note.media[mediaIndex];
         const key = mediaKey(task, note.id, mediaIndex);
         let existing = index.items[key];
+        if (existing?.deleted) {
+          Object.assign(media, { localPath: null, error: null, excluded: true });
+          imagesExcluded += 1;
+          current += 1;
+          await onProgress({ current, total, imagesDownloaded, previewImages, imagesAvailable, imagesFailed, imagesUpgradeFailed, imagesExcluded });
+          continue;
+        }
         let existingPath = existing?.fileName ? path.join(authorDir, existing.fileName) : null;
         if (existingPath && await this.#exists(existingPath)) {
           ({ stored: existing, filePath: existingPath } = await this.#hydrateExisting({
@@ -122,8 +133,10 @@ export class LocalImageStore {
         const preserveSuccessful = retryKeys && !retryKeys.has(`${note.id}:${mediaIndex}`);
         // 补采中退出时，索引可能已落盘但整轮失败清单尚未更新；尺寸/来源仍能证明这张已完成。
         if (existingPath && (preserveSuccessful || storedImageCoversCandidate(existing, media))) {
-          if (existing.sourceUrl !== media.url) {
-            existing = { ...existing, sourceUrl: media.url };
+          const stale = existing.sourceUrl !== media.url
+            || Object.entries(source).some(([field, value]) => existing[field] !== value);
+          if (stale) {
+            existing = { ...existing, sourceUrl: media.url, ...source };
             index.items[key] = existing;
             await this.#saveIndex(indexFile, index);
           }
@@ -143,6 +156,7 @@ export class LocalImageStore {
             signal,
             existing,
             existingPath,
+            source,
           });
           if (downloaded) imagesDownloaded += 1;
         }
@@ -151,13 +165,13 @@ export class LocalImageStore {
         if (media.error) imagesFailed += 1;
         if (media.warning) imagesUpgradeFailed += 1;
         current += 1;
-        await onProgress({ current, total, imagesDownloaded, previewImages, imagesAvailable, imagesFailed, imagesUpgradeFailed });
+        await onProgress({ current, total, imagesDownloaded, previewImages, imagesAvailable, imagesFailed, imagesUpgradeFailed, imagesExcluded });
       }
     }
 
     return {
       directory: authorDir, notes: result, imagesDownloaded, previewImages,
-      imagesAvailable, imagesFailed, imagesUpgradeFailed, imagesSkipped: imagesAvailable - imagesDownloaded,
+      imagesAvailable, imagesFailed, imagesUpgradeFailed, imagesExcluded, imagesSkipped: imagesAvailable - imagesDownloaded,
     };
   }
 
@@ -173,6 +187,7 @@ export class LocalImageStore {
     signal,
     existing,
     existingPath,
+    source,
   }) {
     let temporary;
     try {
@@ -190,7 +205,7 @@ export class LocalImageStore {
       const duplicatePath = duplicate?.fileName ? path.join(authorDir, duplicate.fileName) : null;
       if (duplicatePath && await this.#exists(duplicatePath)) {
         const previousFileName = existing?.fileName;
-        index.items[key] = { ...duplicate, sourceUrl: media.url };
+        index.items[key] = { ...duplicate, sourceUrl: media.url, ...source };
         await this.#saveIndex(indexFile, index);
         if (
           previousFileName
@@ -223,10 +238,11 @@ export class LocalImageStore {
         sourceUrl: media.url,
         width: metadata.width,
         height: metadata.height,
-        quality: qualityFor(metadata),
+        quality: qualityFor(metadata, media),
         contentType: metadata.contentType,
         byteLength: buffer.length,
         sha256,
+        ...source,
       };
       await this.#saveIndex(indexFile, index);
       applyStoredMedia(media, index.items[key], destination);
